@@ -1,0 +1,31 @@
+# quant-bench model config
+# ========================
+# A list of model families. All quants of a family share one tokenizer, so the
+# tokenizer lives here per family (no separate --tokenizer flag).
+#
+# Pick a config with:  uv run quant-bench run --config models.yaml
+# (multiple .yaml files are fine - one per benchmark set)
+#
+# Entry keys:
+#   tokenizer:    required - HuggingFace tokenizer dir matching the GGUFs
+#   models-dir:   optional - where the .gguf files live (default: tokenizer's dir)
+#   flags:        optional - llama-server flags shared by every model in the group
+#   models:       required - 1-5 .gguf paths total, relative to models-dir (absolute OK)
+#
+# Example (group flags + one model with its own flags):
+#   - tokenizer: ~/models/Qwen3.8-27B
+#     models-dir: ~/models/quantized
+#     flags: ["--split-mode", "none", "--jinja"]   # applies to every model below
+#     models:
+#       - Qwen3.8-27B-Q4_K_M.gguf                  # plain string -> uses group flags
+#       - path: Qwen3.8-27B-Q6_K.gguf              # mapping form -> per-model flags
+#         flags: ["--split-mode", "none", "--main-gpu", "1", "--jinja"]
+#
+# Per-model flags REPLACE the group flags for that model (they don't merge).
+# Quote numeric flag values in YAML ("0", not 0).
+- tokenizer: ~/Desktop/llama/models/gemma4-e2b
+  models-dir: ~/Desktop/llama/models/gemma4-e2b
+  flags: ["--split-mode", "none", "--main-gpu", "0", "--jinja"]
+  models:
+    - gemma-4-E2B-it-Q3_K_M.gguf
+    - gemma-4-E2B-it-Q4_K_M.gguf

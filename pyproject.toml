@@ -10,7 +10,7 @@ dependencies = [
     "transformers>=4.40",
     "pandas>=2.0",
     "lox>=0.3",
-    "typer>=0.12",
+    "click>=8.1",
     "GitPython>=3.1",
     "python-dotenv>=1.0",
     "matplotlib>=3.8",
@@ -38,7 +38,7 @@ select = ["E", "F", "W", "I", "B"]
 "src/quant_bench/cli.py" = ["E402"]
 
 [tool.ruff.lint.flake8-bugbear]
-extend-immutable-calls = ["typer.Option", "typer.Argument"]
+extend-immutable-calls = ["click.option", "click.argument", "click.Path"]
 
 [build-system]
 requires = ["hatchling"]

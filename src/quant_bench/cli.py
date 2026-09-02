@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.metadata
 import shutil
 import subprocess
+import sys
 import time
 import warnings
 from pathlib import Path
@@ -12,7 +13,7 @@ from typing import Optional
 
 warnings.filterwarnings("ignore", message=".*doesn't match a supported version.*")
 
-import typer
+import click
 from rich.console import Console
 from rich.prompt import FloatPrompt
 
@@ -24,14 +25,19 @@ from quant_bench.perf import probe
 from quant_bench.ppl import PPLError, find_llama_perplexity, run_ppl
 from quant_bench.report import ModelScore, compute_scores, write_report
 
-app = typer.Typer(
-    help="Benchmark 1-5 GGUF quantizations: MMLU + aider polyglot coding, via llama-server.",
-    no_args_is_help=True,
-)
 console = Console()
 
 AIDER_REPO = "https://github.com/Aider-AI/aider.git"
 POLYGLOT_REPO = "https://github.com/Aider-AI/polyglot-benchmark.git"
+
+
+@click.group(invoke_without_command=True)
+@click.pass_context
+def app(ctx: click.Context) -> None:
+    """Benchmark 1-5 GGUF quantizations: MMLU + aider polyglot coding, via llama-server."""
+    if ctx.invoked_subcommand is None:
+        click.echo(ctx.get_help())
+        ctx.exit()
 
 
 def _clone(repo: str, dest: Path, tag: Optional[str] = None) -> None:
@@ -85,7 +91,7 @@ def _fail(msg: str) -> None:
         msg: The error message to display.
     """
     console.print(f"[red]error:[/red] {msg}")
-    raise typer.Exit(1)
+    sys.exit(1)
 
 
 def _fmt_dur(seconds: float) -> str:
@@ -172,19 +178,15 @@ def _estimate_runtime(
 
 
 @app.command()
-def setup(
-    benchmark_root: Path = typer.Option(
-        Path("tmp.benchmarks"), "--benchmark-root", help="Where to clone the benchmark repos"
-    ),
-) -> None:
-    """Clone aider (tag matching installed aider-chat) and polyglot-benchmark.
-
-    Args:
-        benchmark_root: Directory to clone the benchmark repos into.
-
-    Raises:
-        typer.Exit: If git is not available.
-    """
+@click.option(
+    "--benchmark-root",
+    type=click.Path(path_type=Path),
+    default="tmp.benchmarks",
+    show_default=True,
+    help="Where to clone the benchmark repos",
+)
+def setup(benchmark_root: Path) -> None:
+    """Clone aider (tag matching installed aider-chat) and polyglot-benchmark."""
     if shutil.which("git") is None:
         _fail("git not found on PATH; it is required for setup")
     v = _aider_version()
@@ -198,101 +200,161 @@ def setup(
 
 
 @app.command()
+@click.option(
+    "--config",
+    type=click.Path(path_type=Path),
+    default="models.yaml",
+    show_default=True,
+    help="YAML model config: list of family groups (tokenizer, models-dir, flags, models); 1-5 models total",
+)
+@click.option("--llama-server", default="llama-server", show_default=True, help="llama-server binary (name or path)")
+@click.option("--port", type=int, default=8080, show_default=True)
+@click.option(
+    "--host",
+    default="0.0.0.0",
+    show_default=True,
+    help="Interface llama-server binds to (client still connects via 127.0.0.1)",
+)
+@click.option(
+    "--device", default="vram", show_default=True, help="vram (all layers on GPU), cpu or hybrid (needs --ngl)"
+)
+@click.option("--ngl", type=int, default=None, help="GPU layers; overrides --device")
+@click.option("--threads", type=int, default=None, help="CPU threads for llama-server")
+@click.option("--parallel", type=int, default=None, help="llama-server slots (default: --mmlu-concurrency)")
+@click.option(
+    "--ctx",
+    type=int,
+    default=8192,
+    show_default=True,
+    help=(
+        "Per-request context size; the server gets -c ctx x slots "
+        "(total KV grows with --mmlu-concurrency, lower either if you OOM)"
+    ),
+)
+@click.option(
+    "--extra-flags",
+    multiple=True,
+    default=(),
+    help="Extra llama-server flags, single tokens only (repeatable), e.g. --extra-flags -fa",
+)
+@click.option(
+    "--log-level",
+    type=int,
+    default=2,
+    show_default=True,
+    help=(
+        "llama-server -lv (1=error, 2=warn, 3=info, 4=trace, 5=debug). "
+        "Default 2 (warn) keeps the per-request info flood out of the server logs; "
+        "raise to 3+ to debug (logs grow to multi-GB on MMLU)."
+    ),
+)
+@click.option("--mmlu-task", default="mmlu", show_default=True, help="mmlu (loglikelihood) or mmlu_generative")
+@click.option(
+    "--mmlu-limit",
+    type=int,
+    default=None,
+    help="MMLU docs per subject (smoke tests; applied to each of the 57 MMLU subjects)",
+)
+@click.option(
+    "--mmlu-concurrency", type=int, default=8, show_default=True, help="parallel MMLU scoring requests"
+)
+@click.option("--edit-format", default="whole", show_default=True, help="aider edit format (whole, udiff, ...)")
+@click.option("--languages", default="python", show_default=True, help="polyglot languages, comma separated")
+@click.option("--tries", type=int, default=2, show_default=True, help="polyglot tries per test")
+@click.option(
+    "--coding-limit",
+    type=int,
+    default=None,
+    help="Run only N polyglot tests (unseeded shuffle: results not comparable across models)",
+)
+@click.option("--perf-requests", type=int, default=20, show_default=True)
+@click.option("--perf-max-tokens", type=int, default=128, show_default=True)
+@click.option(
+    "--weights", type=float, default=None, help="MMLU weight for the composite score, 0.0-1.0 (skips the prompt)"
+)
+@click.option(
+    "--results-dir",
+    type=click.Path(path_type=Path),
+    required=True,
+    help="Where report/logs/server logs go (created if missing); use a different dir per config",
+)
+@click.option(
+    "--benchmark-root",
+    type=click.Path(path_type=Path),
+    default="tmp.benchmarks",
+    show_default=True,
+)
+@click.option(
+    "--startup-timeout", type=int, default=900, show_default=True, help="Max seconds to wait for server+model load"
+)
+@click.option("--skip-mmlu", is_flag=True, default=False)
+@click.option("--skip-perf", is_flag=True, default=False)
+@click.option("--skip-coding", is_flag=True, default=False)
+@click.option(
+    "--ppl-reference",
+    type=click.Path(path_type=Path),
+    default="scripts/ppl_ref.txt",
+    show_default=True,
+    help="Reference text for the PPL fidelity metric (lower PPL = better quant)",
+)
+@click.option("--skip-ppl", is_flag=True, default=False)
+@click.option(
+    "--ppl-weight",
+    type=float,
+    default=0.5,
+    show_default=True,
+    help="PPL (fidelity) weight in the composite score, 0.0-1.0",
+)
+@click.option("--ppl-ctx", type=int, default=1024, show_default=True, help="Context window for the PPL probe")
+@click.option("--ppl-runs", type=int, default=2, show_default=True, help="PPL runs per model (mean + reproducibility)")
+@click.option(
+    "--coding-kv-fix",
+    default="f16",
+    show_default=True,
+    help="Coding-server determinism fix: f16 (f16 KV cache), no-cache (--no-cache-prompt), or off",
+)
+@click.option("-y", "--yes", is_flag=True, default=False, help="Skip the preflight confirmation prompt")
 def run(
-    config_file: Path = typer.Option(
-        Path("models.yaml"),
-        "--config",
-        help="YAML model config: list of family groups (tokenizer, models-dir, flags, models); 1-5 models total",
-    ),
-    llama_server: str = typer.Option("llama-server", "--llama-server", help="llama-server binary (name or path)"),
-    port: int = typer.Option(8080, "--port"),
-    host: str = typer.Option(
-        "0.0.0.0", "--host", help="Interface llama-server binds to (client still connects via 127.0.0.1)"
-    ),
-    device: str = typer.Option("vram", "--device", help="vram (all layers on GPU), cpu or hybrid (needs --ngl)"),
-    ngl: Optional[int] = typer.Option(None, "--ngl", help="GPU layers; overrides --device"),
-    threads: Optional[int] = typer.Option(None, "--threads", help="CPU threads for llama-server"),
-    parallel: Optional[int] = typer.Option(
-        None, "--parallel", help="llama-server slots (default: --mmlu-concurrency)"
-    ),
-    ctx: int = typer.Option(
-        8192,
-        "--ctx",
-        help=(
-            "Per-request context size; the server gets -c ctx x slots "
-            "(total KV grows with --mmlu-concurrency, lower either if you OOM)"
-        ),
-    ),
-    extra_flags: Optional[list[str]] = typer.Option(
-        None, "--extra-flags", help="Extra llama-server flags, single tokens only (repeatable), e.g. --extra-flags -fa"
-    ),
-    log_level: int = typer.Option(
-        2,
-        "--log-level",
-        help=(
-            "llama-server -lv (1=error, 2=warn, 3=info, 4=trace, 5=debug). "
-            "Default 2 (warn) keeps the per-request info flood out of the server logs; "
-            "raise to 3+ to debug (logs grow to multi-GB on MMLU)."
-        ),
-    ),
-    mmlu_task: str = typer.Option("mmlu", "--mmlu-task", help="mmlu (loglikelihood) or mmlu_generative"),
-    mmlu_limit: Optional[int] = typer.Option(
-        None, "--mmlu-limit", help="MMLU docs per subject (smoke tests; applied to each of the 57 MMLU subjects)"
-    ),
-    mmlu_concurrency: int = typer.Option(8, "--mmlu-concurrency", help="parallel MMLU scoring requests"),
-    edit_format: str = typer.Option("whole", "--edit-format", help="aider edit format (whole, udiff, ...)"),
-    languages: str = typer.Option("python", "--languages", help="polyglot languages, comma separated"),
-    tries: int = typer.Option(2, "--tries", help="polyglot tries per test"),
-    coding_limit: Optional[int] = typer.Option(
-        None,
-        "--coding-limit",
-        help="Run only N polyglot tests (unseeded shuffle: results not comparable across models)",
-    ),
-    perf_requests: int = typer.Option(20, "--perf-requests"),
-    perf_max_tokens: int = typer.Option(128, "--perf-max-tokens"),
-    weights: Optional[float] = typer.Option(
-        None, "--weights", help="MMLU weight for the composite score, 0.0-1.0 (skips the prompt)"
-    ),
-    results_dir: Path = typer.Option(
-        ...,
-        "--results-dir",
-        help="Where report/logs/server logs go (created if missing); use a different dir per config",
-    ),
-    benchmark_root: Path = typer.Option(Path("tmp.benchmarks"), "--benchmark-root"),
-    startup_timeout: int = typer.Option(900, "--startup-timeout", help="Max seconds to wait for server+model load"),
-    skip_mmlu: bool = typer.Option(False, "--skip-mmlu"),
-    skip_perf: bool = typer.Option(False, "--skip-perf"),
-    skip_coding: bool = typer.Option(False, "--skip-coding"),
-    ppl_reference: Path = typer.Option(
-        Path("scripts/ppl_ref.txt"),
-        "--ppl-reference",
-        help="Reference text for the PPL fidelity metric (lower PPL = better quant)",
-    ),
-    skip_ppl: bool = typer.Option(False, "--skip-ppl"),
-    ppl_weight: float = typer.Option(
-        0.5, "--ppl-weight", help="PPL (fidelity) weight in the composite score, 0.0-1.0"
-    ),
-    ppl_ctx: int = typer.Option(1024, "--ppl-ctx", help="Context window for the PPL probe"),
-    ppl_runs: int = typer.Option(2, "--ppl-runs", help="PPL runs per model (mean + reproducibility)"),
-    coding_kv_fix: str = typer.Option(
-        "f16",
-        "--coding-kv-fix",
-        help="Coding-server determinism fix: f16 (f16 KV cache), no-cache (--no-cache-prompt), or off",
-    ),
-    yes: bool = typer.Option(False, "-y", "--yes", help="Skip the preflight confirmation prompt"),
+    config: Path,
+    llama_server: str,
+    port: int,
+    host: str,
+    device: str,
+    ngl: Optional[int],
+    threads: Optional[int],
+    parallel: Optional[int],
+    ctx: int,
+    extra_flags: list[str],
+    log_level: int,
+    mmlu_task: str,
+    mmlu_limit: Optional[int],
+    mmlu_concurrency: int,
+    edit_format: str,
+    languages: str,
+    tries: int,
+    coding_limit: Optional[int],
+    perf_requests: int,
+    perf_max_tokens: int,
+    weights: Optional[float],
+    results_dir: Path,
+    benchmark_root: Path,
+    startup_timeout: int,
+    skip_mmlu: bool,
+    skip_perf: bool,
+    skip_coding: bool,
+    ppl_reference: Path,
+    skip_ppl: bool,
+    ppl_weight: float,
+    ppl_ctx: int,
+    ppl_runs: int,
+    coding_kv_fix: str,
+    yes: bool,
 ) -> None:
     """Benchmark every model in --config, one at a time, and write a ranked report.
 
-    Loads each model from --config in turn, runs the enabled stages (MMLU, perf,
-    coding, PPL), computes a composite score, and writes report.md / report.json
-    plus per-model logs into --results-dir. A runtime estimate and a MMLU-weight
-    prompt are shown before anything runs (suppressible with --yes / --weights).
-
-    The many options mirror the CLI flags (device, ctx, MMLU/coding/PPL tuning,
-    skip flags, ...); see ``--help`` for each.
-
-    Raises:
-        typer.Exit: On invalid options or a failed preflight/config check.
+    Runs the enabled stages (MMLU, perf, coding, PPL) for each model in --config,
+    computes a composite score, and writes report.md / report.json plus per-model
+    logs into --results-dir.
     """
     if not skip_mmlu and mmlu_task not in ("mmlu", "mmlu_generative"):
         _fail(f"unknown --mmlu-task {mmlu_task!r} (use mmlu or mmlu_generative)")
@@ -306,7 +368,7 @@ def run(
         _fail(f"--ppl-reference not found: {ppl_reference} (or pass --skip-ppl)")
 
     try:
-        models = load_models(config_file)
+        models = load_models(config)
     except ConfigError as e:
         _fail(str(e))
 
@@ -362,9 +424,9 @@ def run(
     for line in scope:
         console.print(f"  [dim]{line}[/dim]")
     if not yes:
-        if not typer.confirm("Continue?"):
+        if not click.confirm("Continue?"):
             console.print("Aborted.")
-            raise typer.Exit()
+            sys.exit(0)
     if weights is None:
         weight = FloatPrompt.ask(
             "MMLU weight for the composite score (0.0-1.0, rest goes to aider coding)", default=0.5
@@ -502,7 +564,7 @@ def run(
     meta = {
         "llama_server": binary,
         "llama_server_version": version,
-        "config": str(config_file),
+        "config": str(config),
         "total_duration_s": round(time.time() - t_start, 1),
         "mmlu_task": None if skip_mmlu else mmlu_task,
         "mmlu_limit": mmlu_limit,
@@ -519,7 +581,7 @@ def run(
 
 
 def main() -> None:
-    """Entry point that launches the quant-bench Typer CLI."""
+    """Entry point that launches the quant-bench CLI."""
     app()
 
 

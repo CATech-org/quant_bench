@@ -2366,6 +2366,7 @@ version = "0.1.0"
 source = { editable = "." }
 dependencies = [
     { name = "aider-chat" },
+    { name = "click" },
     { name = "gitpython" },
     { name = "imgcat" },
     { name = "lm-eval", extra = ["api"] },
@@ -2380,12 +2381,12 @@ dependencies = [
     { name = "requests" },
     { name = "rich" },
     { name = "transformers" },
-    { name = "typer" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "aider-chat", specifier = "==0.86.2" },
+    { name = "click", specifier = ">=8.1" },
     { name = "gitpython", specifier = ">=3.1" },
     { name = "imgcat", specifier = ">=0.6" },
     { name = "lm-eval", extras = ["api"], specifier = ">=0.4.9" },
@@ -2398,7 +2399,6 @@ requires-dist = [
     { name = "requests", specifier = ">=2.31" },
     { name = "rich", specifier = ">=13.0" },
     { name = "transformers", specifier = ">=4.40" },
-    { name = "typer", specifier = ">=0.12" },
 ]
 
 [[package]]

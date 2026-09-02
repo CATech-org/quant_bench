@@ -13,7 +13,7 @@ from typing import Optional
 
 from rich.console import Console
 
-from .llama_lm import LlamaServerLM  # noqa: F401  # registers "llama-server" in the lm-eval registry
+from quant_bench.llama_lm import LlamaServerLM  # noqa: F401  # registers "llama-server" in the lm-eval registry
 
 PRIMARY_METRIC = {"mmlu": "acc", "mmlu_generative": "exact_match"}
 TOP_LOGPROBS = 50

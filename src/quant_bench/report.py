@@ -12,10 +12,10 @@ from typing import Any, Optional
 from rich.console import Console
 from rich.table import Table
 
-from .coding import CodingResult
-from .mmlu import MMLUResult
-from .perf import PerfResult
-from .ppl import PPLResult
+from quant_bench.coding import CodingResult
+from quant_bench.mmlu import MMLUResult
+from quant_bench.perf import PerfResult
+from quant_bench.ppl import PPLResult
 
 console = Console()
 

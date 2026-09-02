@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-from .config import ServerProfile
+from quant_bench.config import ServerProfile
 
 DEFAULT_PPL_CTX = 1024
 DEFAULT_PPL_RUNS = 2

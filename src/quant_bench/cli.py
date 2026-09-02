@@ -16,13 +16,13 @@ import typer
 from rich.console import Console
 from rich.prompt import FloatPrompt
 
-from .coding import CodingError, _total_exercises, find_benchmarks, run_coding
-from .config import ConfigError, ServerProfile, load_models, server_args_for
-from .llamaserver import LlamaServer, ServerError, find_llama_server, llama_server_version
-from .mmlu import DOCS_PER_SUBJECT, MMLU_SUBJECTS, run_mmlu
-from .perf import probe
-from .ppl import PPLError, find_llama_perplexity, run_ppl
-from .report import ModelScore, compute_scores, write_report
+from quant_bench.coding import CodingError, _total_exercises, find_benchmarks, run_coding
+from quant_bench.config import ConfigError, ServerProfile, load_models, server_args_for
+from quant_bench.llamaserver import LlamaServer, ServerError, find_llama_server, llama_server_version
+from quant_bench.mmlu import DOCS_PER_SUBJECT, MMLU_SUBJECTS, run_mmlu
+from quant_bench.perf import probe
+from quant_bench.ppl import PPLError, find_llama_perplexity, run_ppl
+from quant_bench.report import ModelScore, compute_scores, write_report
 
 app = typer.Typer(
     help="Benchmark 1-5 GGUF quantizations: MMLU + aider polyglot coding, via llama-server.",

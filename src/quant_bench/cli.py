@@ -35,6 +35,17 @@ POLYGLOT_REPO = "https://github.com/Aider-AI/polyglot-benchmark.git"
 
 
 def _clone(repo: str, dest: Path, tag: Optional[str] = None) -> None:
+    """Shallow-clone a git repo, skipping if the destination already exists.
+
+    Args:
+        repo: The git repository URL to clone.
+        dest: The directory to clone into (created as needed).
+        tag: Optional tag to check out; omitted clones the default branch.
+
+    Raises:
+        subprocess.CalledProcessError: If the clone fails (a partial destination
+            is removed first).
+    """
     if (dest / ".git").is_dir():
         console.print(f"[yellow]Already cloned, skipping:[/yellow] {dest}")
         return
@@ -53,6 +64,14 @@ def _clone(repo: str, dest: Path, tag: Optional[str] = None) -> None:
 
 
 def _aider_version() -> str:
+    """Return the installed aider-chat version.
+
+    Returns:
+        str: The aider-chat version string.
+
+    Raises:
+        ConfigError: If aider-chat is not installed (run ``uv sync`` first).
+    """
     try:
         return importlib.metadata.version("aider-chat")
     except importlib.metadata.PackageNotFoundError as e:
@@ -60,11 +79,24 @@ def _aider_version() -> str:
 
 
 def _fail(msg: str) -> None:
+    """Print an error message and exit the CLI with a non-zero status.
+
+    Args:
+        msg: The error message to display.
+    """
     console.print(f"[red]error:[/red] {msg}")
     raise typer.Exit(1)
 
 
 def _fmt_dur(seconds: float) -> str:
+    """Format a duration in seconds as a short human-friendly estimate.
+
+    Args:
+        seconds: The duration in seconds.
+
+    Returns:
+        str: e.g. ``"~1 h 05 min"`` or ``"~7 min"``.
+    """
     s = int(seconds)
     h, rem = divmod(s, 3600)
     m = rem // 60
@@ -72,7 +104,15 @@ def _fmt_dur(seconds: float) -> str:
 
 
 def _coding_kv_fix_args(fix: str) -> list[str]:
-    """Extra llama-server flags for the coding stage to make it reproducible."""
+    """Extra llama-server flags for the coding stage to make it reproducible.
+
+    Args:
+        fix: The determinism fix: ``f16`` (f16 KV cache), ``no-cache``
+            (``--no-cache-prompt``), or ``off`` (none).
+
+    Returns:
+        list[str]: The extra llama-server flags, or an empty list for ``off``.
+    """
     if fix == "f16":
         return ["--cache-type-k", "f16", "--cache-type-v", "f16"]
     if fix == "no-cache":
@@ -90,7 +130,21 @@ def _estimate_runtime(
     mmlu_limit: Optional[int],
     coding_attempts: Optional[int],
 ) -> tuple[float, float, list[str]]:
-    """Rough (low, high) seconds plus scope lines, assuming a 27B-class model on a decent GPU."""
+    """Rough (low, high) seconds plus scope lines, assuming a 27B-class model on a decent GPU.
+
+    Args:
+        n_models: Number of models in the config.
+        skip_mmlu: Whether the MMLU stage is skipped.
+        skip_perf: Whether the perf probe is skipped.
+        skip_coding: Whether the coding stage is skipped.
+        skip_ppl: Whether the PPL stage is skipped.
+        mmlu_limit: MMLU docs-per-subject override, if any.
+        coding_attempts: Estimated number of coding attempts, or ``None`` if unknown.
+
+    Returns:
+        tuple[float, float, list[str]]: The low and high runtime estimates in
+        seconds, plus one scope line per stage that will run.
+    """
     lo = hi = 0.0
     scope: list[str] = []
     if not skip_mmlu:
@@ -123,7 +177,14 @@ def setup(
         Path("tmp.benchmarks"), "--benchmark-root", help="Where to clone the benchmark repos"
     ),
 ) -> None:
-    """Clone aider (tag matching installed aider-chat) and polyglot-benchmark."""
+    """Clone aider (tag matching installed aider-chat) and polyglot-benchmark.
+
+    Args:
+        benchmark_root: Directory to clone the benchmark repos into.
+
+    Raises:
+        typer.Exit: If git is not available.
+    """
     if shutil.which("git") is None:
         _fail("git not found on PATH; it is required for setup")
     v = _aider_version()
@@ -220,7 +281,19 @@ def run(
     ),
     yes: bool = typer.Option(False, "-y", "--yes", help="Skip the preflight confirmation prompt"),
 ) -> None:
-    """Benchmark every model in --config, one at a time, and write a ranked report."""
+    """Benchmark every model in --config, one at a time, and write a ranked report.
+
+    Loads each model from --config in turn, runs the enabled stages (MMLU, perf,
+    coding, PPL), computes a composite score, and writes report.md / report.json
+    plus per-model logs into --results-dir. A runtime estimate and a MMLU-weight
+    prompt are shown before anything runs (suppressible with --yes / --weights).
+
+    The many options mirror the CLI flags (device, ctx, MMLU/coding/PPL tuning,
+    skip flags, ...); see ``--help`` for each.
+
+    Raises:
+        typer.Exit: On invalid options or a failed preflight/config check.
+    """
     if not skip_mmlu and mmlu_task not in ("mmlu", "mmlu_generative"):
         _fail(f"unknown --mmlu-task {mmlu_task!r} (use mmlu or mmlu_generative)")
     if not (0.0 <= (weights or 0.0) <= 1.0) and weights is not None:
@@ -446,6 +519,7 @@ def run(
 
 
 def main() -> None:
+    """Entry point that launches the quant-bench Typer CLI."""
     app()
 
 

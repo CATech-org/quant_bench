@@ -36,11 +36,26 @@ LOGPROB_FLOOR = -100.0
 
 
 def _norm(tok: Optional[str]) -> str:
+    """Normalize a token string for robust comparison.
+
+    Args:
+        tok: The token text (or ``None``).
+
+    Returns:
+        str: The NFKC-normalized, stripped token text (empty string for ``None``).
+    """
     return unicodedata.normalize("NFKC", tok or "").strip()
 
 
 @register_model("llama-server")
 class LlamaServerLM(TemplateAPI):
+    """An lm-eval API model backed by a running llama.cpp ``llama-server``.
+
+    Computes loglikelihood by asking the server for ``top_logprobs`` on one
+    generated token at a time (see the module docstring), and generations via
+    the standard completions endpoint.
+    """
+
     def __init__(
         self,
         pretrained: str = None,
@@ -50,6 +65,21 @@ class LlamaServerLM(TemplateAPI):
         top_logprobs: int = 50,
         **kwargs,
     ) -> None:
+        """Initialize the llama-server model, validating the tokenizer directory.
+
+        Args:
+            pretrained: Optional pretrained id (unused beyond passthrough).
+            model: Model name to send in requests (defaults to the served id).
+            base_url: llama-server base URL; ``/completions`` is appended if absent.
+            tokenizer: HuggingFace tokenizer id or directory matching the GGUF.
+                Required.
+            top_logprobs: How many top logprobs to request per generated token.
+            **kwargs: Forwarded to the lm-eval ``TemplateAPI`` base class.
+
+        Raises:
+            ValueError: If ``tokenizer`` is missing, points at a directory with
+                no tokenizer files, or fails to load.
+        """
         if tokenizer is None:
             raise ValueError(
                 "the 'llama-server' lm-eval model requires the `tokenizer` "
@@ -85,6 +115,15 @@ class LlamaServerLM(TemplateAPI):
     # ------------------------------------------------------------------ HTTP
 
     def _session(self) -> requests.Session:
+        """Return a thread-local, connection-closed requests Session.
+
+        Connection reuse is disabled (``Connection: close``) because under high
+        request rates reused connections intermittently deliver corrupted
+        request bodies; one socket per request avoids that race.
+
+        Returns:
+            requests.Session: The per-thread session.
+        """
         s = getattr(self._local, "session", None)
         if s is None:
             s = requests.Session()
@@ -97,6 +136,20 @@ class LlamaServerLM(TemplateAPI):
         return s
 
     def _post(self, payload: dict) -> dict:
+        """POST a payload to the server with bounded retries and backoff.
+
+        Retries transient connection errors, timeouts, and HTTP 429/5xx, with
+        jittered exponential backoff so concurrent workers do not re-collide.
+
+        Args:
+            payload: The JSON request body to send.
+
+        Returns:
+            dict: The decoded JSON response body.
+
+        Raises:
+            requests.RequestException: The last error, if all retries fail.
+        """
         last_err: Optional[Exception] = None
         for attempt in range(1, self.max_retries + 1):
             try:
@@ -116,7 +169,16 @@ class LlamaServerLM(TemplateAPI):
     # ------------------------------------------------------------ loglikelihood
 
     def _token_logprob(self, prefix: List[int], target: int) -> Tuple[float, bool]:
-        """Logprob of `target` conditioned on `prefix` (token ids), plus whether it is the greedy argmax."""
+        """Logprob of a single target token conditioned on a prefix.
+
+        Args:
+            prefix: The preceding token ids.
+            target: The continuation token id to score.
+
+        Returns:
+            Tuple[float, bool]: The logprob of ``target`` given ``prefix`` (or
+            ``LOGPROB_FLOOR`` if unavailable) and whether it is the greedy argmax.
+        """
         payload = {
             "model": self.model,
             "prompt": list(prefix),
@@ -152,6 +214,19 @@ class LlamaServerLM(TemplateAPI):
         return LOGPROB_FLOOR, False
 
     def _score_request(self, req: tuple) -> Tuple[float, bool]:
+        """Score one (context, continuation) pair, token by token.
+
+        Sums the logprob of each continuation token given the preceding context
+        and already-scored tokens; truncates the context if it would exceed
+        ``max_length``.
+
+        Args:
+            req: A request tuple of ``(doc_key, context_ids, continuation_ids)``.
+
+        Returns:
+            Tuple[float, bool]: The total logprob and whether every token was
+            the greedy argmax.
+        """
         _, context_enc, continuation_enc = req
         context_enc = list(context_enc)
         continuation_enc = list(continuation_enc)
@@ -171,6 +246,16 @@ class LlamaServerLM(TemplateAPI):
         return total, greedy
 
     def _loglikelihood_tokens(self, requests, **kwargs) -> List[Tuple[float, bool]]:
+        """Score a batch of loglikelihood requests (sequentially or concurrent).
+
+        Args:
+            requests: Iterable of request tuples as understood by
+                ``_score_request``.
+            **kwargs: Optional kwargs; supports ``disable_tqdm`` to hide the bar.
+
+        Returns:
+            List[Tuple[float, bool]]: One ``(logprob, is_greedy)`` per request.
+        """
         disable_tqdm = kwargs.get("disable_tqdm", False)
         # file=sys.stdout: stderr is redirected to /dev/null during MMLU to hide
         # transformers' env-info noise, so the bar must go to stdout to be visible
@@ -202,6 +287,20 @@ class LlamaServerLM(TemplateAPI):
         eos: str = None,
         **kwargs,
     ) -> dict:
+        """Build a completions request payload.
+
+        Args:
+            messages: The prompt (token ids, dict, or string).
+            generate: If true, build a generation payload; otherwise a
+                logprobs-only (``max_tokens=1``) payload.
+            gen_kwargs: Generation parameters (max_tokens, temperature, until, ...).
+            seed: Sampling seed to send with the request.
+            eos: End-of-sequence token used to derive stop sequences.
+            **kwargs: Accepted for interface compatibility; otherwise unused.
+
+        Returns:
+            dict: The JSON payload for the completions endpoint.
+        """
         if generate:
             gen_kwargs = dict(gen_kwargs or {})
             gen_kwargs.pop("do_sample", None)
@@ -237,6 +336,17 @@ class LlamaServerLM(TemplateAPI):
         ctxlen: List[int] = None,
         **kwargs,
     ) -> List[Tuple[float, bool]]:
+        """Not supported here; loglikelihood uses per-token requests instead.
+
+        Args:
+            outputs: Ignored.
+            tokens: Ignored.
+            ctxlen: Ignored.
+            **kwargs: Ignored.
+
+        Raises:
+            NotImplementedError: Always; scoring is done in ``_loglikelihood_tokens``.
+        """
         raise NotImplementedError(
             "llama-server loglikelihood is computed in _loglikelihood_tokens "
             "(per-token conditional requests), not via parse_logprobs"
@@ -244,6 +354,15 @@ class LlamaServerLM(TemplateAPI):
 
     @staticmethod
     def parse_generations(outputs: Union[Dict, List[Dict]], **kwargs) -> List[str]:
+        """Extract the generated text(s) from a completions response.
+
+        Args:
+            outputs: A single response or a list of responses.
+            **kwargs: Accepted for interface compatibility; otherwise unused.
+
+        Returns:
+            List[str]: One generated text per choice, ordered by choice index.
+        """
         res: List[str] = []
         if not isinstance(outputs, list):
             outputs = [outputs]

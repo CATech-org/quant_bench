@@ -36,11 +36,25 @@ _OVERALL_PPL_RE = re.compile(r"overall_ppl\s*=\s*([0-9]+(?:\.[0-9]+)?)", re.IGNO
 
 
 class PPLError(Exception):
-    pass
+    """Raised when the perplexity binary is missing, fails, or cannot be parsed."""
 
 
 @dataclass
 class PPLResult:
+    """Aggregated perplexity measurements for one model.
+
+    Attributes:
+        ppl: Mean perplexity across the runs (lower is better).
+        ppl_se: Mean standard error reported by llama-perplexity (bootstrap), if any.
+        runs: Per-run perplexity values (excluded from ``repr``).
+        runs_se: Per-run standard errors, if reported (excluded from ``repr``).
+        n_tokens: Number of tokens in the reference text.
+        duration_s: Total wall-clock time across all runs.
+        num_runs: Number of runs that were executed.
+        reference: Path to the reference text file.
+        cmd: The command line used for each run.
+    """
+
     ppl: float
     ppl_se: Optional[float]
     runs: list[float] = field(repr=False, default_factory=list)
@@ -53,7 +67,17 @@ class PPLResult:
 
 
 def find_llama_perplexity(llama_server_path: str) -> Path:
-    """Locate the ``llama-perplexity`` binary (expected next to llama-server)."""
+    """Locate the ``llama-perplexity`` binary (expected next to llama-server).
+
+    Args:
+        llama_server_path: Path to llama-server, used to find the sibling binary.
+
+    Returns:
+        Path: Path to the ``llama-perplexity`` binary.
+
+    Raises:
+        PPLError: If the binary is not found next to llama-server or on PATH.
+    """
     cand = Path(llama_server_path).resolve().with_name("llama-perplexity")
     if cand.is_file():
         return cand
@@ -69,7 +93,15 @@ def find_llama_perplexity(llama_server_path: str) -> Path:
 
 
 def parse_ppl(text: str) -> Optional[tuple[float, Optional[float]]]:
-    """Extract ``(ppl, se)`` from llama-perplexity output (stdout+stderr)."""
+    """Extract ``(ppl, se)`` from llama-perplexity output (stdout+stderr).
+
+    Args:
+        text: The combined stdout+stderr from the perplexity process.
+
+    Returns:
+        Optional[tuple[float, Optional[float]]]: The perplexity and its standard
+        error (``None`` if not reported), or ``None`` if neither could be parsed.
+    """
     text = text.replace("\r", "\n")
     m = _FINAL_ESTIMATE_RE.search(text)
     if m:
@@ -87,6 +119,13 @@ def _count_tokens(text: str, tokenizer: Optional[str]) -> int:
 
     More scored tokens => a tighter PPL estimate (llama-perplexity's SE scales as 1/sqrt(n)),
     so this is surfaced in the report so the CI is interpretable.
+
+    Args:
+        text: The reference text to count tokens for.
+        tokenizer: HuggingFace tokenizer id/directory, or ``None`` to estimate.
+
+    Returns:
+        int: The token count (exact if a tokenizer was available, else an estimate).
     """
     if tokenizer:
         try:
@@ -99,7 +138,17 @@ def _count_tokens(text: str, tokenizer: Optional[str]) -> int:
 
 
 def build_ppl_args(model_path: Path, reference: Path, server: ServerProfile, ctx: int) -> list[str]:
-    """Command-line args for llama-perplexity, honoring the profile's device settings."""
+    """Command-line args for llama-perplexity, honoring the profile's device settings.
+
+    Args:
+        model_path: Path to the ``.gguf`` model to load.
+        reference: Path to the reference text file.
+        server: The server profile (provides shared device/thread flags).
+        ctx: Context window (``-c``) for the perplexity run.
+
+    Returns:
+        list[str]: argv tokens for llama-perplexity (excluding the binary itself).
+    """
     return [
         "-m",
         str(model_path),
@@ -125,7 +174,25 @@ def run_ppl(
     timeout: float = DEFAULT_PPL_TIMEOUT,
     tokenizer: Optional[str] = None,
 ) -> PPLResult:
-    """Run llama-perplexity ``runs`` times and aggregate the results."""
+    """Run llama-perplexity ``runs`` times and aggregate the results.
+
+    Args:
+        binary: Path to the ``llama-perplexity`` binary.
+        model_path: Path to the ``.gguf`` model to load.
+        reference: Path to the reference text file.
+        server: The server profile (provides shared device/thread flags).
+        ctx: Context window for the perplexity run.
+        runs: Number of runs to perform.
+        timeout: Per-run timeout in seconds.
+        tokenizer: HuggingFace tokenizer for an exact token count, or ``None``.
+
+    Returns:
+        PPLResult: Mean perplexity, standard error, and per-run details.
+
+    Raises:
+        PPLError: If the reference is missing, a run times out, or output
+            cannot be parsed.
+    """
     reference = Path(reference)
     if not reference.is_file():
         raise PPLError(f"PPL reference file not found: {reference}")

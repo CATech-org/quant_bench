@@ -17,6 +17,19 @@ PROBE_PROMPT = (
 
 @dataclass
 class PerfResult:
+    """Aggregate latency/throughput measurements from a probe run.
+
+    Attributes:
+        n_requests: Number of requests that produced tokens.
+        ttft_ms_mean: Mean time-to-first-token in milliseconds.
+        ttft_ms_p50: 50th-percentile TTFT in milliseconds.
+        ttft_ms_p95: 95th-percentile TTFT in milliseconds.
+        tok_s_mean: Mean generation throughput (tokens/second).
+        tok_s_median: Median generation throughput (tokens/second).
+        total_tokens: Total generated tokens across all requests.
+        duration_s: Wall-clock probe time in seconds.
+    """
+
     n_requests: int
     ttft_ms_mean: float
     ttft_ms_p50: float
@@ -28,6 +41,15 @@ class PerfResult:
 
 
 def _pctl(values: list[float], q: float) -> float:
+    """Linearly-interpolated percentile of a list of values.
+
+    Args:
+        values: The values to take a percentile of.
+        q: The percentile in [0, 1] (e.g. 0.5 for the median).
+
+    Returns:
+        float: The interpolated percentile, or NaN if ``values`` is empty.
+    """
     if not values:
         return float("nan")
     values = sorted(values)
@@ -45,6 +67,21 @@ def probe(
     max_tokens: int = 128,
     timeout: float = 600.0,
 ) -> PerfResult:
+    """Probe a running llama-server for latency and throughput.
+
+    Sends ``n_requests`` streaming greedy completions, measuring time to first
+    token and generation throughput for each.
+
+    Args:
+        base_url: Base URL of the running llama-server.
+        model_name: The served model id to send in requests.
+        n_requests: Number of streaming requests to issue.
+        max_tokens: Maximum tokens to generate per request.
+        timeout: Per-request read timeout in seconds.
+
+    Returns:
+        PerfResult: Aggregated TTFT and throughput statistics.
+    """
     url = f"{base_url}/v1/completions"
     payload = {
         "model": model_name,

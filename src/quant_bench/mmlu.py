@@ -24,6 +24,19 @@ console = Console()
 
 @dataclass
 class MMLUResult:
+    """Aggregated results of one MMLU run.
+
+    Attributes:
+        task: The lm-eval task name (e.g. ``mmlu``).
+        score: The primary metric as a fraction (0-1).
+        score_metric: The metric name that ``score`` refers to (e.g. ``acc``).
+        score_stderr: Standard error of the score (bootstrap), if reported.
+        n_samples: Number of documents scored.
+        duration_s: Wall-clock run time in seconds.
+        raw: Full lm-eval output (excluded from ``repr``).
+        result_path: Path to the saved raw JSON, if any.
+    """
+
     task: str
     score: float
     score_metric: str
@@ -36,6 +49,11 @@ class MMLUResult:
 
 @contextlib.contextmanager
 def _silence_stderr():
+    """Temporarily redirect file-descriptor 2 (stderr) to /dev/null.
+
+    Used to hide fd-level noise (e.g. transformers' env-info probe shelling
+    out to git) that bypasses logging configuration. Yields unconditionally.
+    """
     try:
         null_fd = os.open(os.devnull, os.O_WRONLY)
     except OSError:
@@ -52,6 +70,18 @@ def _silence_stderr():
 
 
 def _metric(metrics: dict, name: str) -> Optional[float]:
+    """Look up a metric by name in an lm-eval metrics dict.
+
+    Tries the ``"<name>,none"`` key first (lm-eval's grouping convention),
+    then the bare name.
+
+    Args:
+        metrics: An lm-eval metrics dictionary.
+        name: The metric name to look up.
+
+    Returns:
+        Optional[float]: The metric as a float, or ``None`` if absent.
+    """
     for key in (f"{name},none", name):
         v = metrics.get(key)
         if isinstance(v, (int, float)) and not isinstance(v, bool):
@@ -70,6 +100,25 @@ def run_mmlu(
     max_length: int = 8192,
     results_dir: Path = Path("results"),
 ) -> MMLUResult:
+    """Run an MMLU evaluation against a running llama-server via lm-eval.
+
+    Args:
+        base_url: Base URL of the running llama-server.
+        model_name: The served model id to send in requests.
+        tokenizer: HuggingFace tokenizer id or directory matching the GGUF.
+        task: The MMLU task: ``mmlu`` (loglikelihood) or ``mmlu_generative``.
+        limit: Docs per subject (for smoke tests); ``None`` uses the default.
+        num_concurrent: Number of parallel scoring requests.
+        max_length: Maximum context length for the evaluation.
+        results_dir: Where to save the raw per-run JSON.
+
+    Returns:
+        MMLUResult: The aggregated score, standard error, and sample count.
+
+    Raises:
+        ValueError: If ``task`` is not a supported MMLU task.
+        RuntimeError: If lm-eval returns no results or the metric is missing.
+    """
     if task not in PRIMARY_METRIC:
         raise ValueError(f"unsupported mmlu task {task!r} (use: {', '.join(PRIMARY_METRIC)})")
     from lm_eval import simple_evaluate

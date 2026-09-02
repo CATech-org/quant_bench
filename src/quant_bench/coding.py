@@ -18,11 +18,31 @@ console = Console()
 
 
 class CodingError(Exception):
-    pass
+    """Raised when the polyglot benchmark cannot be located, run, or parsed."""
 
 
 @dataclass
 class CodingResult:
+    """Aggregated results of one polyglot coding benchmark run.
+
+    Attributes:
+        model: The model name used (``openai/<slug>``).
+        edit_format: aider edit format (e.g. ``whole``).
+        languages: Polyglot languages run (comma-separated).
+        tries: Number of repair-loop tries per test.
+        pass_rate_1: pass@1 as a percentage (``None`` if no completed tests).
+        pass_rate_2: pass@2 as a percentage (``None`` if no completed tests).
+        pass_num_1: Number of exercises passed on try 1.
+        pass_num_2: Number of exercises passed within the tries.
+        completed_tests: Number of exercises with recorded outcomes.
+        total_tests: Total number of exercises targeted.
+        duration_s: Wall-clock run time in seconds.
+        prompt_tokens: Total prompt tokens across exercises.
+        completion_tokens: Total completion tokens across exercises.
+        run_dir: Directory holding the raw per-exercise results.
+        raw: Raw per-exercise result records (excluded from ``repr``).
+    """
+
     model: str
     edit_format: str
     languages: str
@@ -41,6 +61,18 @@ class CodingResult:
 
 
 def find_benchmarks(benchmark_root: Path) -> tuple[Path, Path, Path]:
+    """Locate the aider and polyglot-benchmark repos under a benchmark root.
+
+    Args:
+        benchmark_root: Directory containing the cloned benchmark repos.
+
+    Returns:
+        tuple[Path, Path, Path]: The resolved root, the aider repo, and the
+        polyglot-benchmark directory.
+
+    Raises:
+        CodingError: If the benchmark files are missing (setup not run).
+    """
     root = Path(benchmark_root).resolve()
     aider_repo = root / "aider"
     benchmark_py = aider_repo / "benchmark" / "benchmark.py"
@@ -53,6 +85,18 @@ def find_benchmarks(benchmark_root: Path) -> tuple[Path, Path, Path]:
 
 
 def _find_run_dir(root: Path, name: str) -> Path:
+    """Find the most recent polyglot run directory for a model.
+
+    Args:
+        root: The benchmark root holding run directories.
+        name: The model slug to search for in the run directory name.
+
+    Returns:
+        Path: The run directory with the most recent modification time.
+
+    Raises:
+        CodingError: If no run directory can be found.
+    """
     dirs = [d for d in root.glob(f"*--{name}") if d.is_dir()]
     if not dirs:
         dirs = [
@@ -68,6 +112,16 @@ def _find_run_dir(root: Path, name: str) -> Path:
 
 
 def _load_results(run_dir: Path, languages: str) -> list[dict]:
+    """Load per-exercise ``.aider.results.json`` records from a run directory.
+
+    Args:
+        run_dir: The polyglot run directory.
+        languages: Comma-separated languages to load (empty = all languages).
+
+    Returns:
+        list[dict]: The parsed result records, each tagged with its exercise
+        name and language.
+    """
     if languages:
         pats = [f"{lang.strip()}/exercises/practice/*/.aider.results.json" for lang in languages.split(",")]
     else:
@@ -87,6 +141,15 @@ def _load_results(run_dir: Path, languages: str) -> list[dict]:
 
 
 def _count_done(run_dir: Path, languages: str) -> int:
+    """Count completed exercises (result files present) in a run directory.
+
+    Args:
+        run_dir: The polyglot run directory.
+        languages: Comma-separated languages to count (empty = all languages).
+
+    Returns:
+        int: The number of result files present.
+    """
     if languages:
         pats = [f"{lang.strip()}/exercises/practice/*/.aider.results.json" for lang in languages.split(",")]
     else:
@@ -98,6 +161,16 @@ def _count_done(run_dir: Path, languages: str) -> int:
 
 
 def _total_exercises(polyglot: Path, languages: str, num_tests: int) -> int:
+    """Count the total practice exercises available for the given languages.
+
+    Args:
+        polyglot: The polyglot-benchmark directory.
+        languages: Comma-separated languages (empty = all present languages).
+        num_tests: If positive, cap the total at this many tests.
+
+    Returns:
+        int: The number of practice exercises (capped by ``num_tests``).
+    """
     langs = [part.strip() for part in languages.split(",") if part.strip()] or ["*"]
     total = 0
     for lang in langs:
@@ -119,7 +192,21 @@ def _progress_poller(
     pre_existing: set,
     interval: float = 30.0,
 ) -> None:
-    """Print one progress line per finished exercise (and a heartbeat if one exercise is slow)."""
+    """Poll a run in a background thread and print per-exercise progress.
+
+    Prints one line per newly finished exercise (and a periodic heartbeat if an
+    exercise is slow). Swallows all errors so it can never crash the run.
+
+    Args:
+        root: The benchmark root holding run directories.
+        model_slug: The model slug to locate the run directory for.
+        languages: Comma-separated languages being run.
+        total: Total exercises expected (for the progress denominator).
+        t0: Start timestamp (``time.time()``) for elapsed-time display.
+        stop: Event whose set stops the polling loop.
+        pre_existing: Run directories that existed before this run (excluded).
+        interval: Seconds between polls.
+    """
     last_count = -1
     last_print = 0.0
     while not stop.wait(interval):
@@ -146,6 +233,19 @@ def _summarize(
     tries: int,
     duration_s: float,
 ) -> CodingResult:
+    """Aggregate a finished run directory into a CodingResult.
+
+    Args:
+        run_dir: The polyglot run directory to summarize.
+        model: The model name to record.
+        edit_format: The aider edit format that was used.
+        languages: The languages that were run.
+        tries: The number of tries per test.
+        duration_s: Wall-clock run time in seconds.
+
+    Returns:
+        CodingResult: The aggregated result (pass@1, pass@2, tokens, ...).
+    """
     results = _load_results(run_dir, languages)
     if languages:
         total_tests = sum(
@@ -196,6 +296,30 @@ def run_coding(
     threads: int = 1,
     log_path: Path,
 ) -> CodingResult:
+    """Run the polyglot coding benchmark against a running llama-server.
+
+    Invokes the cloned aider ``benchmark.py`` in-process with ``AIDER_DOCKER=1``
+    and the OpenAI API base pointed at the server, in a background progress
+    poller, then summarizes the resulting run directory.
+
+    Args:
+        benchmark_root: Directory containing the aider and polyglot repos.
+        server_url: Base URL of the running llama-server.
+        model_slug: The model slug/alias to benchmark.
+        server_ctx: The server's per-request context, passed to ``--num-ctx``.
+        edit_format: aider edit format to use.
+        languages: Comma-separated polyglot languages.
+        tries: Number of repair-loop tries per test.
+        num_tests: If positive, cap the number of tests to run.
+        threads: Number of parallel benchmark threads (``--threads``).
+        log_path: Where the benchmark process's stdout/stderr are written.
+
+    Returns:
+        CodingResult: The aggregated coding result.
+
+    Raises:
+        CodingError: If the benchmark exits non-zero (with the log tail).
+    """
     root, aider_repo, polyglot = find_benchmarks(benchmark_root)
     root.mkdir(parents=True, exist_ok=True)
 

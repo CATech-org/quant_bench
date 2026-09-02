@@ -25,6 +25,33 @@ _COMPONENT_LABELS = {"ppl": "PPL", "mmlu": "MMLU", "coding": "aider pass@2"}
 
 @dataclass
 class ModelScore:
+    """All per-model results plus the computed composite score and its rank.
+
+    Attributes:
+        label: The model's display label (filename).
+        slug: The model's path/URL-safe identifier.
+        path: Path to the ``.gguf`` model file.
+        flags: Extra llama-server flags specific to this model.
+        server_cmd: The full llama-server command line that was used.
+        server_version: The llama-server version banner.
+        mmlu: The MMLU result, if it ran.
+        perf: The perf probe result, if it ran.
+        coding: The coding benchmark result, if it ran.
+        ppl: The PPL fidelity result, if it ran.
+        ppl_score: Normalized 0-100 PPL fidelity (best model in the run = 100).
+        ppl_score_runs: Per-run 0-100 PPL fidelity values.
+        ppl_score_se: Standard error (score points) of the PPL fidelity.
+        mmlu_error: MMLU failure message, if it failed.
+        perf_error: perf failure message, if it failed.
+        coding_error: coding failure message, if it failed.
+        ppl_error: PPL failure message, if it failed.
+        score: The composite 0-100 score, or ``None`` if no component completed.
+        rank: 1-based rank among scored models, or ``None`` if unscored.
+        nonsignificant: True if an adjacent-rank gap is within the combined CIs.
+        score_components: The present components as (name, normalized_weight,
+            value_0_100), filled by ``compute_scores``.
+    """
+
     label: str
     slug: str
     path: str
@@ -45,8 +72,6 @@ class ModelScore:
     score: Optional[float] = None
     rank: Optional[int] = None
     nonsignificant: bool = False
-    # The composite's present components as (name, normalized_weight, value_0_100),
-    # filled by compute_scores so the report can show exactly how the score was built.
     score_components: list[tuple[str, float, float]] = field(default_factory=list)
 
 
@@ -57,6 +82,13 @@ def _component_weights(mmlu_weight: float, ppl_weight: float) -> tuple[float, fl
         score = w_ppl * PPL_fidelity + w_mmlu * MMLU% + w_coding * aider-pass@2%
     where w_ppl = ppl_weight and the remaining (1 - ppl_weight) is split between MMLU and
     aider pass@2 by mmlu_weight.
+
+    Args:
+        mmlu_weight: MMLU weight within the non-PPL (capability) half.
+        ppl_weight: PPL (fidelity) weight of the whole score.
+
+    Returns:
+        tuple[float, float, float]: ``(w_ppl, w_mmlu, w_coding)``.
     """
     w_ppl = ppl_weight
     w_mmlu = (1.0 - ppl_weight) * mmlu_weight
@@ -65,7 +97,15 @@ def _component_weights(mmlu_weight: float, ppl_weight: float) -> tuple[float, fl
 
 
 def _component_value(s: ModelScore, name: str) -> Optional[float]:
-    """0-100 value of a single component (None if that metric is unavailable)."""
+    """0-100 value of a single component (None if that metric is unavailable).
+
+    Args:
+        s: The model's results.
+        name: The component name: ``ppl``, ``mmlu`` or ``coding``.
+
+    Returns:
+        Optional[float]: The component's 0-100 value, or ``None`` if absent.
+    """
     if name == "ppl":
         return s.ppl_score
     if name == "mmlu":
@@ -80,6 +120,15 @@ def _composite_components(s: ModelScore, mmlu_weight: float, ppl_weight: float) 
 
     A missing metric simply drops out and the remaining weights are rescaled, so a partial run
     still yields a score on the same 0-100 scale (no silent dilution of the score).
+
+    Args:
+        s: The model's results.
+        mmlu_weight: MMLU weight within the non-PPL (capability) half.
+        ppl_weight: PPL (fidelity) weight of the whole score.
+
+    Returns:
+        list[tuple[str, float, float]]: The present (name, weight, value) triples,
+        with weights renormalized to sum to 1.
     """
     w_ppl, w_mmlu, w_coding = _component_weights(mmlu_weight, ppl_weight)
     raw: list[tuple[str, float, float]] = []
@@ -96,6 +145,17 @@ def _composite_components(s: ModelScore, mmlu_weight: float, ppl_weight: float) 
 
 
 def compute_scores(scores: list[ModelScore], mmlu_weight: float, ppl_weight: float = 0.0) -> None:
+    """Compute each model's composite score and 1-based rank (in place).
+
+    Normalizes PPL across the scored set (best/lowest PPL -> 100), propagates the
+    PPL standard error into score points, then builds each model's composite as a
+    renormalized weighted sum of its present components and assigns ranks.
+
+    Args:
+        scores: The models' results, mutated in place (score, components, rank).
+        mmlu_weight: MMLU weight within the non-PPL (capability) half.
+        ppl_weight: PPL (fidelity) weight of the whole score.
+    """
     # PPL is lower-is-better and unbounded, so normalize across the scored set:
     # the best (lowest) PPL -> 100, others scale by the ratio. This is what makes a
     # PPL-dominant composite reproducible and comparable.
@@ -120,15 +180,42 @@ def compute_scores(scores: list[ModelScore], mmlu_weight: float, ppl_weight: flo
 
 
 def _pct(v: Optional[float]) -> str:
+    """Format a value as a one-decimal percentage.
+
+    Args:
+        v: The value, or ``None``.
+
+    Returns:
+        str: The formatted percentage, or ``"n/a"`` for ``None``.
+    """
     return "n/a" if v is None else f"{v:.1f}%"
 
 
 def _num(v: Optional[float], fmt: str = "{:.0f}") -> str:
+    """Format a value with the given format string.
+
+    Args:
+        v: The value, or ``None``.
+        fmt: A Python format string.
+
+    Returns:
+        str: The formatted value, or ``"n/a"`` for ``None``.
+    """
     return "n/a" if v is None else fmt.format(v)
 
 
 def _wilson_ci(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
-    """Wilson score 95% CI for a binomial proportion, in percent."""
+    """Wilson score 95% CI for a binomial proportion, in percent.
+
+    Args:
+        k: Number of successes.
+        n: Number of trials.
+        z: Number of standard deviations for the interval (1.96 = 95%).
+
+    Returns:
+        tuple[float, float]: The (lower, upper) CI bounds in percent, clamped to
+        [0, 100]; (0.0, 0.0) if ``n`` is not positive.
+    """
     if n <= 0:
         return (0.0, 0.0)
     p = k / n
@@ -139,14 +226,30 @@ def _wilson_ci(k: int, n: int, z: float = 1.96) -> tuple[float, float]:
 
 
 def _mmlu_ci_half(s: ModelScore) -> Optional[float]:
-    """Half-width (score points) of the 95% CI on the MMLU component."""
+    """Half-width (score points) of the 95% CI on the MMLU component.
+
+    Args:
+        s: The model's results.
+
+    Returns:
+        Optional[float]: ``1.96 * stderr`` in score points, or ``None`` if MMLU or
+        its stderr is unavailable.
+    """
     if s.mmlu is None or s.mmlu.score_stderr is None:
         return None
     return 1.96 * s.mmlu.score_stderr * 100.0
 
 
 def _coding_ci_half(s: ModelScore) -> Optional[float]:
-    """Half-width (percentage points) of the Wilson 95% CI on pass@2."""
+    """Half-width (percentage points) of the Wilson 95% CI on pass@2.
+
+    Args:
+        s: The model's results.
+
+    Returns:
+        Optional[float]: The CI half-width in percentage points, or ``None`` if
+        coding results are unavailable.
+    """
     if s.coding is None or s.coding.completed_tests <= 0 or s.coding.pass_rate_2 is None:
         return None
     lo, hi = _wilson_ci(s.coding.pass_num_2, s.coding.completed_tests)
@@ -160,6 +263,13 @@ def _ppl_ci_half(s: ModelScore) -> Optional[float]:
     (x1.96). RMS-combined with any run-to-run spread so between-run jitter is captured too.
     Using the bootstrap SE (not just the run spread) is what keeps the composite CI honest:
     with a long reference the PPL SE is small, so a real PPL gap is flagged significant.
+
+    Args:
+        s: The model's results.
+
+    Returns:
+        Optional[float]: The CI half-width in score points, or ``None`` if no
+        PPL uncertainty is available.
     """
     parts: list[float] = []
     if s.ppl_score_se is not None:
@@ -176,6 +286,15 @@ def _score_ci_half(s: ModelScore, mmlu_weight: float, ppl_weight: float = 0.0) -
 
     Weighted RMS of the present components' CIs, using the same renormalized weights as the
     score itself. Returns None if any present component lacks a CI (we won't claim significance).
+
+    Args:
+        s: The model's results.
+        mmlu_weight: MMLU weight within the non-PPL (capability) half.
+        ppl_weight: PPL (fidelity) weight of the whole score.
+
+    Returns:
+        Optional[float]: The composite CI half-width in score points, or ``None`` if
+        it cannot be determined.
     """
     comps = _composite_components(s, mmlu_weight, ppl_weight)
     if not comps:
@@ -188,7 +307,13 @@ def _score_ci_half(s: ModelScore, mmlu_weight: float, ppl_weight: float = 0.0) -
 
 
 def _mark_nonsignificant(scores: list[ModelScore], mmlu_weight: float, ppl_weight: float = 0.0) -> None:
-    """Flag models whose adjacent-rank score difference is within the combined 95% CIs."""
+    """Flag models whose adjacent-rank score difference is within the combined 95% CIs.
+
+    Args:
+        scores: The models' results, mutated in place (``nonsignificant``).
+        mmlu_weight: MMLU weight within the non-PPL (capability) half.
+        ppl_weight: PPL (fidelity) weight of the whole score.
+    """
     for s in scores:
         s.nonsignificant = False
     ranked = sorted((s for s in scores if s.rank is not None), key=lambda s: s.rank)
@@ -202,6 +327,14 @@ def _mark_nonsignificant(scores: list[ModelScore], mmlu_weight: float, ppl_weigh
 
 
 def _mmlu_cell(s: ModelScore) -> str:
+    """Table cell for MMLU: percentage with its 95% CI half-width, or ``n/a``.
+
+    Args:
+        s: The model's results.
+
+    Returns:
+        str: e.g. ``"53.0% ±1.3"``, or ``"n/a"`` if MMLU did not run.
+    """
     if s.mmlu is None:
         return "n/a"
     h = _mmlu_ci_half(s)
@@ -209,6 +342,15 @@ def _mmlu_cell(s: ModelScore) -> str:
 
 
 def _pass_cell(s: ModelScore, which: int) -> str:
+    """Table cell for aider pass@N with its Wilson 95% CI half-width, or ``n/a``.
+
+    Args:
+        s: The model's results.
+        which: The pass@N to display (``1`` or ``2``).
+
+    Returns:
+        str: e.g. ``"5.9% ±8.4"``, or ``"n/a"`` if coding did not run.
+    """
     if s.coding is None or s.coding.completed_tests <= 0:
         return "n/a"
     rate = s.coding.pass_rate_1 if which == 1 else s.coding.pass_rate_2
@@ -220,6 +362,14 @@ def _pass_cell(s: ModelScore, which: int) -> str:
 
 
 def _ppl_cell(s: ModelScore) -> str:
+    """Table cell for PPL with its 95% CI half-width, or ``n/a``.
+
+    Args:
+        s: The model's results.
+
+    Returns:
+        str: e.g. ``"155.84±3.75"``, or ``"n/a"`` if PPL did not run.
+    """
     if s.ppl is None:
         return "n/a"
     if s.ppl.ppl_se is not None:
@@ -228,7 +378,15 @@ def _ppl_cell(s: ModelScore) -> str:
 
 
 def _composite_label(weight: float, ppl_weight: float) -> str:
-    """Human-readable composite formula. `weight` = MMLU weight within the capability half."""
+    """Human-readable composite formula. `weight` = MMLU weight within the capability half.
+
+    Args:
+        weight: MMLU weight within the non-PPL (capability) half.
+        ppl_weight: PPL (fidelity) weight of the whole score.
+
+    Returns:
+        str: A human-readable formula for the composite score.
+    """
     if ppl_weight <= 0.0:
         return f"{weight:.2f} x MMLU + {1 - weight:.2f} x aider pass@2"
     w_ppl = ppl_weight
@@ -238,6 +396,16 @@ def _composite_label(weight: float, ppl_weight: float) -> str:
 
 
 def _table(scores: list[ModelScore], weight: float, ppl_weight: float = 0.0) -> Table:
+    """Build a rich console table of the results, sorted by rank.
+
+    Args:
+        scores: The models' results.
+        weight: MMLU weight within the non-PPL (capability) half.
+        ppl_weight: PPL (fidelity) weight of the whole score.
+
+    Returns:
+        Table: The populated rich table for display.
+    """
     t = Table(title=f"quant-bench results (score = {_composite_label(weight, ppl_weight)})")
     t.add_column("rank", justify="right")
     t.add_column("model")
@@ -267,6 +435,16 @@ def _table(scores: list[ModelScore], weight: float, ppl_weight: float = 0.0) -> 
 
 
 def _model_entry(s: ModelScore, weight: float, ppl_weight: float = 0.0) -> dict[str, Any]:
+    """Build the per-model JSON report entry.
+
+    Args:
+        s: The model's results.
+        weight: MMLU weight within the non-PPL (capability) half.
+        ppl_weight: PPL (fidelity) weight of the whole score.
+
+    Returns:
+        dict[str, Any]: The JSON-serializable entry for one model.
+    """
     h_m = _mmlu_ci_half(s)
     return {
         "label": s.label,
@@ -347,6 +525,15 @@ def _model_entry(s: ModelScore, weight: float, ppl_weight: float = 0.0) -> dict[
 
 
 def _mmlu_subjects_table(scores: list[ModelScore]) -> list[str]:
+    """Markdown table of MMLU accuracy by subject, sorted by cross-model spread.
+
+    Args:
+        scores: The models' results.
+
+    Returns:
+        list[str]: The markdown lines, or an empty list if fewer than two models
+        have per-subject MMLU results.
+    """
     ranked = [s for s in scores if s.mmlu and (s.mmlu.raw or {}).get("results")]
     if len(ranked) < 2:
         return []
@@ -384,6 +571,15 @@ def _mmlu_subjects_table(scores: list[ModelScore]) -> list[str]:
 
 
 def _coding_exercises_table(scores: list[ModelScore]) -> list[str]:
+    """Markdown table of per-exercise coding outcomes across the models.
+
+    Args:
+        scores: The models' results.
+
+    Returns:
+        list[str]: The markdown lines, or an empty list if no model has coding
+        results.
+    """
     ranked = [s for s in scores if s.coding and s.coding.raw]
     if not ranked:
         return []
@@ -421,6 +617,17 @@ def _coding_exercises_table(scores: list[ModelScore]) -> list[str]:
 
 
 def _markdown(scores: list[ModelScore], weight: float, meta: dict, ppl_weight: float = 0.0) -> str:
+    """Render the full markdown report.
+
+    Args:
+        scores: The models' results.
+        weight: MMLU weight within the non-PPL (capability) half.
+        meta: Run metadata (llama-server, config, durations, ...) to list up top.
+        ppl_weight: PPL (fidelity) weight of the whole score.
+
+    Returns:
+        str: The markdown report text.
+    """
     lines: list[str] = []
     lines.append("# quant-bench results")
     lines.append("")
@@ -537,6 +744,19 @@ def write_report(
     meta: Optional[dict] = None,
     ppl_weight: float = 0.0,
 ) -> tuple[Path, Path]:
+    """Mark significance, print the summary table, and write the report files.
+
+    Args:
+        scores: The models' results.
+        weight: MMLU weight within the non-PPL (capability) half.
+        results_dir: Directory to write ``report.md`` and ``report.json`` into
+            (created if missing).
+        meta: Run metadata to embed in the reports.
+        ppl_weight: PPL (fidelity) weight of the whole score.
+
+    Returns:
+        tuple[Path, Path]: The paths to the written markdown and JSON reports.
+    """
     results_dir = Path(results_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
     meta = meta or {}

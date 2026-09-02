@@ -18,32 +18,71 @@ MODEL_KEYS = {"path", "flags"}
 
 
 class ConfigError(Exception):
-    pass
+    """Raised when models.yaml is missing, malformed, or points at invalid files."""
 
 
 def _slugify(name: str) -> str:
+    """Turn a model filename stem into a path/URL-safe slug.
+
+    Args:
+        name: The name to slugify (typically a GGUF filename stem).
+
+    Returns:
+        str: The slugified name, or ``"model"`` if nothing usable remains.
+    """
     slug = re.sub(r"[^A-Za-z0-9._-]+", "-", name).strip("-.")
     return slug or "model"
 
 
 @dataclass
 class ModelSpec:
+    """One GGUF model to benchmark, sharing its model family's tokenizer.
+
+    Attributes:
+        path: Path to the ``.gguf`` model file.
+        tokenizer: Path to the HuggingFace tokenizer directory for the family.
+        flags: Extra llama-server flags specific to this model (override group flags).
+    """
+
     path: Path
     tokenizer: Path
     flags: list[str] = field(default_factory=list)
 
     @property
     def slug(self) -> str:
+        """Path/URL-safe identifier derived from the model filename stem.
+
+        Returns:
+            str: The slug, used as the server ``--alias`` and in result filenames.
+        """
         return _slugify(self.path.stem)
 
     @property
     def label(self) -> str:
+        """Display label for the model (its filename).
+
+        Returns:
+            str: The model filename, e.g. ``gemma-4-E2B-it-Q3_K_M.gguf``.
+        """
         return self.path.name
 
 
 @dataclass
 class ServerProfile:
-    """Global llama-server settings (per-model flags in models.yaml override these)."""
+    """Global llama-server settings (per-model flags in models.yaml override these).
+
+    Attributes:
+        port: TCP port for llama-server to bind.
+        host: Interface for llama-server to bind to (clients still use 127.0.0.1).
+        ctx: Per-request context size (the server is given ``ctx * parallel``).
+        device: Device mode: ``vram`` (all layers on GPU), ``cpu`` or ``hybrid``.
+        ngl: Explicit GPU layer count; overrides ``device`` when set.
+        threads: llama-server CPU threads (``-t``).
+        parallel: Number of llama-server slots (``--parallel``).
+        extra_flags: Extra single-token llama-server flags.
+        ppl_ctx: Context window for the ``llama-perplexity`` probe.
+        log_level: llama-server ``-lv`` verbosity (1=error .. 5=debug).
+    """
 
     port: int = 8080
     host: str = "0.0.0.0"
@@ -57,6 +96,15 @@ class ServerProfile:
     log_level: int = 2
 
     def _device_args(self) -> list[str]:
+        """Translate the device/offload settings into llama-server flags.
+
+        Returns:
+            list[str]: Device/offload argv tokens (``-ngl ...``).
+
+        Raises:
+            ConfigError: If ``device`` is ``hybrid`` without an ``ngl`` value, or
+                is an unrecognized value.
+        """
         if self.ngl is not None:
             return ["-ngl", str(self.ngl)]
         if self.device == "vram":
@@ -68,6 +116,11 @@ class ServerProfile:
         raise ConfigError(f"unknown --device {self.device!r} (use vram, cpu or hybrid)")
 
     def base_args(self) -> list[str]:
+        """Device, threading, slot and logging flags for the serving llama-server.
+
+        Returns:
+            list[str]: argv tokens to append to the llama-server command line.
+        """
         args: list[str] = self._device_args()
         if self.threads is not None:
             args += ["-t", str(self.threads)]
@@ -78,7 +131,14 @@ class ServerProfile:
         return args
 
     def ppl_base_args(self) -> list[str]:
-        """Device/offload flags for llama-perplexity (same offload as the server, no slots/extra flags)."""
+        """Device/offload flags for llama-perplexity (same offload as the server).
+
+        The perplexity binary loads the model itself, so it takes no slot or
+        extra-flags arguments; only the device and thread settings are shared.
+
+        Returns:
+            list[str]: Device/thread argv tokens for the perplexity command.
+        """
         args: list[str] = self._device_args()
         if self.threads is not None:
             args += ["-t", str(self.threads)]
@@ -86,6 +146,15 @@ class ServerProfile:
 
 
 def _resolve(base: Path, raw: str) -> Path:
+    """Resolve a possibly-relative path against a base directory.
+
+    Args:
+        base: Directory to resolve relative paths against (the config file's parent).
+        raw: The path as written in the config; may be relative or ``~/``-anchored.
+
+    Returns:
+        Path: The fully-resolved absolute path.
+    """
     p = Path(raw).expanduser()
     if not p.is_absolute():
         p = (base / p).resolve()
@@ -93,12 +162,33 @@ def _resolve(base: Path, raw: str) -> Path:
 
 
 def _check_flags(flags: Any, what: str) -> list[str]:
+    """Validate that a ``flags`` value is a list of strings.
+
+    Args:
+        flags: The value to validate.
+        what: Human-readable label for the entry, used in error messages.
+
+    Returns:
+        list[str]: The flags as a fresh list.
+
+    Raises:
+        ConfigError: If ``flags`` is not a list of strings.
+    """
     if not isinstance(flags, list) or not all(isinstance(f, str) for f in flags):
         raise ConfigError(f"{what}: flags must be a list of strings")
     return list(flags)
 
 
 def _check_tokenizer_dir(tok: Path, what: str) -> None:
+    """Verify a tokenizer directory exists and contains a usable tokenizer.
+
+    Args:
+        tok: The tokenizer directory to check.
+        what: Human-readable label for the entry, used in error messages.
+
+    Raises:
+        ConfigError: If the directory is missing or has no tokenizer files.
+    """
     if not tok.is_dir():
         raise ConfigError(f"{what}: tokenizer directory not found: {tok}")
     if not any((tok / f).is_file() for f in TOKENIZER_BACKEND_FILES):
@@ -110,8 +200,23 @@ def _check_tokenizer_dir(tok: Path, what: str) -> None:
 
 
 def load_models(path: Path) -> list[ModelSpec]:
-    """Parse a models.yaml: a list of family groups, each with a tokenizer dir,
-    a models-dir (defaults to the tokenizer dir), shared flags, and 1+ .gguf models."""
+    """Parse a models.yaml into the list of models to benchmark.
+
+    The file is a list of model-family groups; each group has a tokenizer dir,
+    an optional models-dir (defaulting to the tokenizer dir), shared flags, and
+    one or more ``.gguf`` models.
+
+    Args:
+        path: Path to the models.yaml config file.
+
+    Returns:
+        list[ModelSpec]: The flattened list of models to benchmark (1 to
+            ``MAX_MODELS`` total).
+
+    Raises:
+        ConfigError: If the file is missing, malformed, or references
+            non-existent or invalid models or tokenizer directories.
+    """
     if not path.is_file():
         raise ConfigError(
             f"model config file not found: {path}\n"
@@ -179,9 +284,21 @@ def load_models(path: Path) -> list[ModelSpec]:
 
 
 def server_args_for(model: ModelSpec, server: ServerProfile) -> list[str]:
-    # This llama-server build treats -c as the TOTAL KV budget, split evenly
-    # across --parallel slots. We want --ctx to be the per-request context,
-    # so pass ctx * slots.
+    """Build the full llama-server command-line args for one model.
+
+    Args:
+        model: The model to serve.
+        server: The global server profile (port, ctx, device, etc.).
+
+    Returns:
+        list[str]: argv tokens for llama-server (model, port, host, alias,
+            context, plus shared base flags and the model's own flags).
+
+    Note:
+        This llama-server build treats ``-c`` as the total KV budget, split
+        evenly across ``--parallel`` slots, so ``ctx * slots`` is passed to make
+        ``--ctx`` the per-request context.
+    """
     slots = server.parallel or 1
     args = [
         "-m",

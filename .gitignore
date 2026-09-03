@@ -9,5 +9,6 @@ build/
 results*/
 *-results/
 tmp.benchmarks/
+local/
 .env
 *.log

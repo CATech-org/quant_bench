@@ -14,7 +14,7 @@ from typing import Optional
 from rich.console import Console
 
 from quant_bench.coding import run_coding
-from quant_bench.config import ModelSpec, ServerProfile, server_args_for
+from quant_bench.config import LlamaServerFlags, ModelSpec, ServerProfile, server_flags_for
 from quant_bench.llamaserver import LlamaServer, ServerError
 from quant_bench.mmlu import run_mmlu
 from quant_bench.perf import probe
@@ -117,18 +117,18 @@ def run_model(cfg: RunConfig, model: ModelSpec) -> ModelScore:
     Returns:
         ModelScore: The populated per-model results.
     """
-    args = server_args_for(model, cfg.server)
+    server_flags = server_flags_for(model, cfg.server)
     score = ModelScore(
         label=model.label,
         slug=model.slug,
         path=str(model.path),
         flags=list(model.flags),
-        server_cmd=f"{cfg.binary} {' '.join(args)}",
+        server_cmd=f"{cfg.binary} {' '.join(server_flags.argv())}",
         server_version=cfg.version,
     )
     try:
-        _run_mmlu_and_perf(cfg, args, model, score)
-        _run_coding(cfg, args, model, score)
+        _run_mmlu_and_perf(cfg, server_flags, model, score)
+        _run_coding(cfg, server_flags, model, score)
         _run_ppl(cfg, model, score)
     except ServerError as e:
         console.print(f"[red]server error:[/red] {e}")
@@ -136,7 +136,7 @@ def run_model(cfg: RunConfig, model: ModelSpec) -> ModelScore:
     return score
 
 
-def _run_mmlu_and_perf(cfg: RunConfig, args: list[str], model: ModelSpec, score: ModelScore) -> None:
+def _run_mmlu_and_perf(cfg: RunConfig, flags: LlamaServerFlags, model: ModelSpec, score: ModelScore) -> None:
     """Server #1: run the MMLU and perf stages on a fresh llama-server.
 
     The server is started outside the per-stage guards, so a startup failure
@@ -145,13 +145,13 @@ def _run_mmlu_and_perf(cfg: RunConfig, args: list[str], model: ModelSpec, score:
 
     Args:
         cfg: The resolved run settings.
-        args: Base llama-server args for this model.
+        flags: Base llama-server flags for this model.
         model: The model to benchmark.
         score: The per-model results to populate.
     """
     srv = LlamaServer(
         binary=cfg.binary,
-        args=args,
+        flags=flags,
         log_path=cfg.results_dir / f"server_{model.slug}.log",
         startup_timeout=cfg.startup_timeout,
     )
@@ -197,7 +197,7 @@ def _run_mmlu_and_perf(cfg: RunConfig, args: list[str], model: ModelSpec, score:
         srv.stop()
 
 
-def _run_coding(cfg: RunConfig, args: list[str], model: ModelSpec, score: ModelScore) -> None:
+def _run_coding(cfg: RunConfig, flags: LlamaServerFlags, model: ModelSpec, score: ModelScore) -> None:
     """Server #2: run the polyglot coding benchmark on its own llama-server.
 
     Uses a fresh server with the coding determinism fix, isolated from the
@@ -205,15 +205,16 @@ def _run_coding(cfg: RunConfig, args: list[str], model: ModelSpec, score: ModelS
 
     Args:
         cfg: The resolved run settings.
-        args: Base llama-server args for this model.
+        flags: Base llama-server flags for this model.
         model: The model to benchmark.
         score: The per-model results to populate.
     """
     if cfg.skip_coding:
         return
+    code_flags = flags.model_copy(update={"extra": [*flags.extra, *_coding_kv_fix_args(cfg.coding_kv_fix)]})
     csrv = LlamaServer(
         binary=cfg.binary,
-        args=args + _coding_kv_fix_args(cfg.coding_kv_fix),
+        flags=code_flags,
         log_path=cfg.results_dir / f"server_{model.slug}_coding.log",
         startup_timeout=cfg.startup_timeout,
     )

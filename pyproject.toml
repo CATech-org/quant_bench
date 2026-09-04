@@ -15,6 +15,7 @@ dependencies = [
     "python-dotenv>=1.0",
     "matplotlib>=3.8",
     "openai>=2.0",
+    "pydantic>=2",
     "imgcat>=0.6",
     "pytest>=8.0",
     "pyyaml>=6.0",

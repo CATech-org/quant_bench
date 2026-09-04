@@ -4,7 +4,14 @@ import textwrap
 
 import pytest
 
-from quant_bench.config import ConfigError, ModelSpec, ServerProfile, load_models, server_args_for
+from quant_bench.config import (
+    ConfigError,
+    LlamaServerFlags,
+    ModelSpec,
+    ServerProfile,
+    load_models,
+    server_flags_for,
+)
 
 
 def _arg(args: list[str], flag: str) -> str:
@@ -17,10 +24,10 @@ def _spec(tmp_path) -> ModelSpec:
     return ModelSpec(path=gguf, tokenizer=tmp_path / "tok", flags=[])
 
 
-def test_server_args_ctx_is_multiplied_by_slots(tmp_path):
+def test_server_flags_ctx_is_multiplied_by_slots(tmp_path):
     spec = _spec(tmp_path)
     prof = ServerProfile(port=1234, ctx=4096, device="cpu", parallel=8)
-    args = server_args_for(spec, prof)
+    args = server_flags_for(spec, prof).argv()
     assert _arg(args, "-c") == str(4096 * 8)
     assert _arg(args, "--parallel") == "8"
     assert _arg(args, "-ngl") == "0"
@@ -28,18 +35,18 @@ def test_server_args_ctx_is_multiplied_by_slots(tmp_path):
     assert _arg(args, "--alias") == "m"
 
 
-def test_server_args_host_default_and_override(tmp_path):
+def test_server_flags_host_default_and_override(tmp_path):
     spec = _spec(tmp_path)
     prof = ServerProfile(port=1234, ctx=4096, device="cpu")
-    assert _arg(server_args_for(spec, prof), "--host") == "0.0.0.0"
+    assert _arg(server_flags_for(spec, prof).argv(), "--host") == "0.0.0.0"
     prof_local = ServerProfile(port=1234, ctx=4096, device="cpu", host="127.0.0.1")
-    assert _arg(server_args_for(spec, prof_local), "--host") == "127.0.0.1"
+    assert _arg(server_flags_for(spec, prof_local).argv(), "--host") == "127.0.0.1"
 
 
-def test_server_args_without_parallel_defaults_to_one_slot(tmp_path):
+def test_server_flags_without_parallel_defaults_to_one_slot(tmp_path):
     spec = _spec(tmp_path)
     prof = ServerProfile(port=1, ctx=8192, device="vram")
-    args = server_args_for(spec, prof)
+    args = server_flags_for(spec, prof).argv()
     assert _arg(args, "-c") == "8192"
     assert _arg(args, "-ngl") == "all"
     assert "--parallel" not in args
@@ -49,6 +56,20 @@ def test_server_args_hybrid_requires_ngl():
     prof = ServerProfile(device="hybrid")
     with pytest.raises(ConfigError):
         prof.base_args()
+
+
+def test_server_flags_typed_fields(tmp_path):
+    gguf = tmp_path / "m.gguf"
+    gguf.write_text("")
+    spec = ModelSpec(path=gguf, tokenizer=tmp_path / "tok", flags=["--mlock"])
+    prof = ServerProfile(port=1234, ctx=4096, device="cpu", parallel=2, threads=4, extra_flags=["--no-mmap"])
+    flags = server_flags_for(spec, prof)
+    assert isinstance(flags, LlamaServerFlags)
+    assert flags.port == 1234 and isinstance(flags.port, int)
+    assert flags.ctx == 4096 * 2
+    assert flags.ngl == "0"
+    assert flags.extra == ["--no-mmap", "--mlock"]
+    assert flags.argv()[:2] == ["-m", str(gguf)]
 
 
 # ---------------------------------------------------------------- models.yaml

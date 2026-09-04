@@ -12,7 +12,7 @@ from pathlib import Path
 
 import quant_bench.runner as runner
 from quant_bench.coding import CodingResult
-from quant_bench.config import ModelSpec, ServerProfile
+from quant_bench.config import LlamaServerFlags, ModelSpec, ServerProfile
 from quant_bench.llamaserver import ServerError
 from quant_bench.mmlu import MMLUResult
 from quant_bench.perf import PerfResult
@@ -55,6 +55,10 @@ def _cfg(**overrides) -> runner.RunConfig:
 
 def _model() -> ModelSpec:
     return ModelSpec(path=Path("/models/q3.gguf"), tokenizer=Path("/tok"), flags=[])
+
+
+def _flags() -> LlamaServerFlags:
+    return LlamaServerFlags(model="/m.gguf", port=8080, host="0.0.0.0", alias="m", ctx=8192, ngl="all")
 
 
 def _blank_score() -> ModelScore:
@@ -203,7 +207,7 @@ def test_run_mmlu_and_perf_runs_both(monkeypatch):
     monkeypatch.setattr(runner, "run_mmlu", lambda **kw: _mmlu())
     monkeypatch.setattr(runner, "probe", lambda **kw: _perf())
     score = _blank_score()
-    runner._run_mmlu_and_perf(_cfg(), ["-m", "x"], _model(), score)
+    runner._run_mmlu_and_perf(_cfg(), _flags(), _model(), score)
     assert score.mmlu is not None
     assert score.perf is not None
     assert state["started"] == 1 and state["stopped"] == 1
@@ -215,7 +219,7 @@ def test_run_mmlu_and_perf_respects_skip(monkeypatch):
     monkeypatch.setattr(runner, "run_mmlu", lambda **kw: called.append("mmlu"))
     monkeypatch.setattr(runner, "probe", lambda **kw: called.append("perf"))
     score = _blank_score()
-    runner._run_mmlu_and_perf(_cfg(skip_mmlu=True, skip_perf=True), ["-m", "x"], _model(), score)
+    runner._run_mmlu_and_perf(_cfg(skip_mmlu=True, skip_perf=True), _flags(), _model(), score)
     assert called == []
     assert score.mmlu is None and score.perf is None
     assert state["started"] == 1 and state["stopped"] == 1  # server still cycles for the enabled set
@@ -230,7 +234,7 @@ def test_run_mmlu_and_perf_isolates_stage_failure(monkeypatch):
     monkeypatch.setattr(runner, "run_mmlu", bad_mmlu)
     monkeypatch.setattr(runner, "probe", lambda **kw: _perf())
     score = _blank_score()
-    runner._run_mmlu_and_perf(_cfg(), ["-m", "x"], _model(), score)
+    runner._run_mmlu_and_perf(_cfg(), _flags(), _model(), score)
     assert "mmlu broke" in score.mmlu_error
     assert score.perf is not None  # the perf stage still runs after MMLU fails
 
@@ -239,7 +243,7 @@ def test_run_coding_skipped(monkeypatch):
     state = _fake_server(monkeypatch)
     monkeypatch.setattr(runner, "run_coding", lambda **kw: _coding())
     score = _blank_score()
-    runner._run_coding(_cfg(skip_coding=True), ["-m", "x"], _model(), score)
+    runner._run_coding(_cfg(skip_coding=True), _flags(), _model(), score)
     assert state["started"] == 0  # no coding server is spawned
     assert score.coding is None
 
@@ -248,7 +252,7 @@ def test_run_coding_runs(monkeypatch):
     state = _fake_server(monkeypatch)
     monkeypatch.setattr(runner, "run_coding", lambda **kw: _coding())
     score = _blank_score()
-    runner._run_coding(_cfg(coding_kv_fix="no-cache"), ["-m", "x"], _model(), score)
+    runner._run_coding(_cfg(coding_kv_fix="no-cache"), _flags(), _model(), score)
     assert score.coding is not None
     assert state["started"] == 1 and state["stopped"] == 1
 
@@ -261,7 +265,7 @@ def test_run_coding_captures_error(monkeypatch):
 
     monkeypatch.setattr(runner, "run_coding", bad)
     score = _blank_score()
-    runner._run_coding(_cfg(), ["-m", "x"], _model(), score)
+    runner._run_coding(_cfg(), _flags(), _model(), score)
     assert "coding broke" in score.coding_error
 
 

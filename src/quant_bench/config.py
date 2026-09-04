@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 import yaml
+from pydantic import BaseModel, Field
 
 MAX_MODELS = 5
 MIN_MODELS = 1
@@ -95,6 +96,27 @@ class ServerProfile:
     ppl_ctx: int = 1024
     log_level: int = 2
 
+    def resolved_ngl(self) -> str:
+        """Resolve the GPU layer count (``-ngl`` value) from the device/offload settings.
+
+        Returns:
+            str: The ``-ngl`` token value: an explicit count, ``"all"`` (vram),
+                or ``"0"`` (cpu).
+
+        Raises:
+            ConfigError: If ``device`` is ``hybrid`` without an ``ngl`` value, or
+                is an unrecognized value.
+        """
+        if self.ngl is not None:
+            return str(self.ngl)
+        if self.device == "vram":
+            return "all"
+        if self.device == "cpu":
+            return "0"
+        if self.device == "hybrid":
+            raise ConfigError("--device hybrid requires --ngl N (number of GPU layers)")
+        raise ConfigError(f"unknown --device {self.device!r} (use vram, cpu or hybrid)")
+
     def _device_args(self) -> list[str]:
         """Translate the device/offload settings into llama-server flags.
 
@@ -105,15 +127,7 @@ class ServerProfile:
             ConfigError: If ``device`` is ``hybrid`` without an ``ngl`` value, or
                 is an unrecognized value.
         """
-        if self.ngl is not None:
-            return ["-ngl", str(self.ngl)]
-        if self.device == "vram":
-            return ["-ngl", "all"]
-        if self.device == "cpu":
-            return ["-ngl", "0"]
-        if self.device == "hybrid":
-            raise ConfigError("--device hybrid requires --ngl N (number of GPU layers)")
-        raise ConfigError(f"unknown --device {self.device!r} (use vram, cpu or hybrid)")
+        return ["-ngl", self.resolved_ngl()]
 
     def base_args(self) -> list[str]:
         """Device, threading, slot and logging flags for the serving llama-server.
@@ -143,6 +157,66 @@ class ServerProfile:
         if self.threads is not None:
             args += ["-t", str(self.threads)]
         return args
+
+
+class LlamaServerFlags(BaseModel):
+    """Typed llama-server flags for one model, expandable to an argv list.
+
+    The well-known flags are first-class fields so ``port`` is a real ``int``
+    rather than a token parsed out of a list; free-form options (per-model and
+    ``--extra`` flags) are kept in ``extra``.
+
+    Attributes:
+        model: Path to the ``.gguf`` model file (``-m``).
+        port: TCP port to bind (``--port``).
+        host: Interface to bind (``--host``).
+        alias: Served model alias (``--alias``).
+        ctx: Total KV budget (``-c``); per-request context times slot count.
+        ngl: GPU layer count (``-ngl``): ``"all"``, ``"0"``, or a number.
+        threads: CPU threads (``-t``), if set.
+        parallel: Number of slots (``--parallel``), if set.
+        log_level: ``-lv`` verbosity (1=error .. 5=debug).
+        extra: Free-form flags appended last (per-model + ``--extra`` options).
+    """
+
+    model: str
+    port: int
+    host: str
+    alias: str
+    ctx: int
+    ngl: str
+    threads: Optional[int] = None
+    parallel: Optional[int] = None
+    log_level: int = 2
+    extra: list[str] = Field(default_factory=list)
+
+    def argv(self) -> list[str]:
+        """Expand the flags into llama-server argv tokens (excluding the binary).
+
+        Returns:
+            list[str]: The ordered command-line tokens for llama-server.
+        """
+        out: list[str] = [
+            "-m",
+            self.model,
+            "--port",
+            str(self.port),
+            "--host",
+            self.host,
+            "--alias",
+            self.alias,
+            "-c",
+            str(self.ctx),
+            "-ngl",
+            self.ngl,
+        ]
+        if self.threads is not None:
+            out += ["-t", str(self.threads)]
+        if self.parallel is not None:
+            out += ["--parallel", str(self.parallel)]
+        out += ["-lv", str(self.log_level)]
+        out += list(self.extra)
+        return out
 
 
 def _resolve(base: Path, raw: str) -> Path:
@@ -283,16 +357,15 @@ def load_models(path: Path) -> list[ModelSpec]:
     return models
 
 
-def server_args_for(model: ModelSpec, server: ServerProfile) -> list[str]:
-    """Build the full llama-server command-line args for one model.
+def server_flags_for(model: ModelSpec, server: ServerProfile) -> LlamaServerFlags:
+    """Build the typed llama-server flags for one model.
 
     Args:
         model: The model to serve.
         server: The global server profile (port, ctx, device, etc.).
 
     Returns:
-        list[str]: argv tokens for llama-server (model, port, host, alias,
-            context, plus shared base flags and the model's own flags).
+        LlamaServerFlags: The typed flags; call ``.argv()`` for the argv tokens.
 
     Note:
         This llama-server build treats ``-c`` as the total KV budget, split
@@ -300,18 +373,15 @@ def server_args_for(model: ModelSpec, server: ServerProfile) -> list[str]:
         ``--ctx`` the per-request context.
     """
     slots = server.parallel or 1
-    args = [
-        "-m",
-        str(model.path),
-        "--port",
-        str(server.port),
-        "--host",
-        server.host,
-        "--alias",
-        model.slug,
-        "-c",
-        str(server.ctx * slots),
-    ]
-    args += server.base_args()
-    args += model.flags
-    return args
+    return LlamaServerFlags(
+        model=str(model.path),
+        port=server.port,
+        host=server.host,
+        alias=model.slug,
+        ctx=server.ctx * slots,
+        ngl=server.resolved_ngl(),
+        threads=server.threads,
+        parallel=server.parallel,
+        log_level=server.log_level,
+        extra=[*server.extra_flags, *model.flags],
+    )

@@ -14,6 +14,8 @@ from typing import Optional
 
 from rich.console import Console
 
+from quant_bench.config import LlamaServerFlags
+
 console = Console()
 
 
@@ -109,15 +111,16 @@ class LlamaServer:
 
     Attributes:
         binary: Path to the llama-server binary.
-        args: argv tokens for the server (must include ``--port``).
+        flags: Typed server flags (model, port, device, ...); see
+            :class:`quant_bench.config.LlamaServerFlags`.
         log_path: Where the server's stdout/stderr are written.
         startup_timeout: Seconds to wait for the server to become healthy.
         proc: The spawned process (``None`` before ``start``/after ``stop``).
-        port: The server's port (populated from ``args`` on ``start``).
+        port: The server's port (copied from ``flags`` on ``start``).
     """
 
     binary: str
-    args: list[str]
+    flags: LlamaServerFlags
     log_path: Path
     startup_timeout: int = 900
 
@@ -140,11 +143,10 @@ class LlamaServer:
         ``log_path``) in its own process group, then blocks until the ``/health``
         endpoint reports ok or ``startup_timeout`` elapses.
         """
-        i = self.args.index("--port")
-        self.port = int(self.args[i + 1])
+        self.port = self.flags.port
         wait_port_free(self.port)
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
-        cmd = [self.binary, *self.args]
+        cmd = [self.binary, *self.flags.argv()]
         console.print(f"[bold]Starting server:[/bold] {' '.join(cmd)}")
         with open(self.log_path, "w") as log:
             self.proc = subprocess.Popen(

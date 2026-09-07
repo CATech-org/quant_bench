@@ -266,6 +266,7 @@ def _run_ppl(cfg: RunConfig, model: ModelSpec, score: ModelScore) -> None:
             ctx=cfg.ppl_ctx,
             runs=cfg.ppl_runs,
             tokenizer=str(model.tokenizer),
+            extra_flags=model.flags,
         )
         se = f" ±{score.ppl.ppl_se:.2f}" if score.ppl.ppl_se is not None else ""
         console.print(
@@ -299,6 +300,7 @@ def build_meta(cfg: RunConfig, duration_s: float) -> dict:
         "languages": None if cfg.skip_coding else cfg.languages,
         "coding_limit": None if cfg.skip_coding else cfg.coding_limit,
         "coding_kv_fix": None if cfg.skip_coding else cfg.coding_kv_fix,
+        "coding_tries": cfg.tries,
         "ppl_weight": None if not cfg.ppl_available else cfg.ppl_weight,
         "ppl_reference": None if not cfg.ppl_available else str(cfg.ppl_reference),
     }

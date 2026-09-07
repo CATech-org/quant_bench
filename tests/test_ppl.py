@@ -77,6 +77,31 @@ def test_build_ppl_args_cpu_with_threads():
     assert args[args.index("-c") + 1] == "2048"
 
 
+def test_build_ppl_args_applies_device_flags():
+    prof = ServerProfile(device="vram", threads=None)
+    args = build_ppl_args(
+        Path("/m/q.gguf"),
+        Path("/ref.txt"),
+        prof,
+        ctx=512,
+        extra_flags=["--main-gpu", "1", "--split-mode", "none", "--alias", "mymodel"],
+    )
+    assert args[args.index("--main-gpu") + 1] == "1"
+    assert args[args.index("--split-mode") + 1] == "none"
+    assert "--alias" not in args and "mymodel" not in args  # serving-only flag dropped
+
+
+def test_select_ppl_flags_keeps_flag_value_pairs():
+    from quant_bench.ppl import _select_ppl_flags
+
+    assert _select_ppl_flags(["--main-gpu", "0", "--alias", "mymodel", "--split-mode", "none"]) == [
+        "--main-gpu",
+        "0",
+        "--split-mode",
+        "none",
+    ]
+
+
 def test_run_ppl_missing_reference(tmp_path: Path):
     with pytest.raises(PPLError, match="reference file not found"):
         run_ppl(

@@ -50,7 +50,7 @@ def _coding(pass_n: int, n: int) -> CodingResult:
         for i in range(n)
     ]
     p1 = sum(1 for r in raw if r["tests_outcomes"][0])
-    p2 = sum(1 for r in raw if (r["tests_outcomes"][0] or (len(r["tests_outcomes"]) > 1 and r["tests_outcomes"][1])))
+    p2 = sum(1 for r in raw if any(r["tests_outcomes"]))
     return CodingResult(
         model="m",
         edit_format="whole",
@@ -216,3 +216,55 @@ def test_write_report_includes_breakdown(tmp_path: Path):
     text = md.read_text()
     assert "= 0.50\u00d7PPL" in text  # per-model score breakdown
     assert "K tokens" in text  # PPL token count surfaced
+
+
+def test_missing_ppl_marks_partial():
+    a = _model("a", 50.0, 0.25, 0.01, 0)
+    b = _model("b", 50.0, 0.25, 0.01, 0)
+    b.ppl = None  # b has no PPL
+    compute_scores([a, b], 0.5, ppl_weight=0.5)  # default PPL weight -> PPL counts
+    assert a.missing_components == []
+    assert b.missing_components == ["ppl"]
+
+
+def test_missing_ppl_not_flagged_when_unweighted():
+    a = _model("a", 50.0, 0.25, 0.01, 0)
+    b = _model("b", 50.0, 0.25, 0.01, 0)
+    b.ppl = None
+    compute_scores([a, b], 0.5, ppl_weight=0.0)  # PPL not in the composite
+    assert a.missing_components == []
+    assert b.missing_components == []
+
+
+def test_write_report_flags_partial(tmp_path: Path):
+    a = _model("a", 53.0, 0.258, 0.0037, 1)
+    b = _model("b", 68.0, 0.261, 0.0037, 0)
+    b.ppl = None
+    compute_scores([a, b], 0.5, ppl_weight=0.5)
+    md, js = write_report([a, b], weight=0.5, results_dir=tmp_path, meta={}, ppl_weight=0.5)
+    text = md.read_text()
+    assert "†" in text  # partial marker on the score and in the legend
+    assert "† partial: missing PPL" in text  # per-model note
+    data = json.loads(js.read_text())
+    by_slug = {m["slug"]: m for m in data["models"]}
+    assert by_slug["a"]["missing_components"] == []
+    assert by_slug["a"]["partial"] is False
+    assert by_slug["b"]["missing_components"] == ["ppl"]
+    assert by_slug["b"]["partial"] is True
+
+
+def test_composite_label_reflects_tries():
+    from quant_bench.report import _composite_label
+
+    assert "aider pass@2" in _composite_label(0.5, 0.0, 2)
+    assert "aider pass@3" in _composite_label(0.5, 0.0, 3)
+    assert "aider pass@3" in _composite_label(0.5, 0.5, 3)  # PPL variant labels pass@N too
+
+
+def test_write_report_labels_tries(tmp_path: Path):
+    a = _model("a", 53.0, 0.258, 0.0037, 1)
+    b = _model("b", 68.0, 0.261, 0.0037, 0)
+    compute_scores([a, b], 0.5, ppl_weight=0.5)
+    md, js = write_report([a, b], weight=0.5, results_dir=tmp_path, meta={"coding_tries": 3}, ppl_weight=0.5)
+    assert "aider pass@3" in md.read_text()
+    assert "pass@3" in json.loads(js.read_text())["composite"]

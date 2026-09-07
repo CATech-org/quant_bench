@@ -51,6 +51,8 @@ class ModelScore:
         nonsignificant: True if an adjacent-rank gap is within the combined CIs.
         score_components: The present components as (name, normalized_weight,
             value_0_100), filled by ``compute_scores``.
+        missing_components: Weighted components this model's score is missing (that at
+            least one other model has), filled by ``compute_scores``.
     """
 
     label: str
@@ -75,6 +77,7 @@ class ModelScore:
     rank: Optional[int] = None
     nonsignificant: bool = False
     score_components: list[tuple[str, float, float]] = field(default_factory=list)
+    missing_components: list[str] = field(default_factory=list)
 
 
 def _component_weights(mmlu_weight: float, ppl_weight: float) -> tuple[float, float, float]:
@@ -179,6 +182,14 @@ def compute_scores(scores: list[ModelScore], mmlu_weight: float, ppl_weight: flo
     ranked.sort(key=lambda s: s.score, reverse=True)
     for i, s in enumerate(ranked, start=1):
         s.rank = i
+    # Flag models scored on a subset of components (e.g. missing PPL) so the report can
+    # mark them as not directly comparable to complete rows.
+    full: set[str] = set()
+    for s in scores:
+        full.update(name for name, _, _ in s.score_components)
+    for s in scores:
+        have = {name for name, _, _ in s.score_components}
+        s.missing_components = sorted(full - have)
 
 
 def _pct(v: Optional[float]) -> str:
@@ -379,42 +390,62 @@ def _ppl_cell(s: ModelScore) -> str:
     return f"{s.ppl.ppl:.2f}"
 
 
-def _composite_label(weight: float, ppl_weight: float) -> str:
+def _composite_label(weight: float, ppl_weight: float, coding_tries: int = 2) -> str:
     """Human-readable composite formula. `weight` = MMLU weight within the capability half.
 
     Args:
         weight: MMLU weight within the non-PPL (capability) half.
         ppl_weight: PPL (fidelity) weight of the whole score.
+        coding_tries: Number of polyglot tries (labels the pass@N term).
 
     Returns:
         str: A human-readable formula for the composite score.
     """
     if ppl_weight <= 0.0:
-        return f"{weight:.2f} x MMLU + {1 - weight:.2f} x aider pass@2"
+        return f"{weight:.2f} x MMLU + {1 - weight:.2f} x aider pass@{coding_tries}"
     w_ppl = ppl_weight
     w_mmlu = (1.0 - ppl_weight) * weight
     w_coding = (1.0 - ppl_weight) * (1.0 - weight)
-    return f"{w_ppl:.2f} x PPL + {w_mmlu:.2f} x MMLU + {w_coding:.2f} x aider pass@2"
+    return f"{w_ppl:.2f} x PPL + {w_mmlu:.2f} x MMLU + {w_coding:.2f} x aider pass@{coding_tries}"
 
 
-def _table(scores: list[ModelScore], weight: float, ppl_weight: float = 0.0) -> Table:
+def _score_cell(s: ModelScore) -> str:
+    """Render the composite score cell: ``n/a`` or the score with ``*`` (nonsignificant)
+    and/or ``†`` (scored on a subset of components).
+
+    Args:
+        s: The model's results.
+
+    Returns:
+        str: The formatted score cell.
+    """
+    if s.score is None:
+        return "n/a"
+    marker = ("*" if s.nonsignificant else "") + ("†" if s.missing_components else "")
+    return f"{s.score:.2f}{marker}"
+
+
+def _table(
+    scores: list[ModelScore], weight: float, ppl_weight: float = 0.0, coding_tries: int = 2
+) -> Table:
     """Build a rich console table of the results, sorted by rank.
 
     Args:
         scores: The models' results.
         weight: MMLU weight within the non-PPL (capability) half.
         ppl_weight: PPL (fidelity) weight of the whole score.
+        coding_tries: Number of polyglot tries (labels the pass@N column).
 
     Returns:
         Table: The populated rich table for display.
     """
-    t = Table(title=f"quant-bench results (score = {_composite_label(weight, ppl_weight)})")
+    t = Table(title=f"quant-bench results (score = {_composite_label(weight, ppl_weight, coding_tries)})")
     t.add_column("rank", justify="right")
     t.add_column("model")
     t.add_column("PPL", justify="right")
     t.add_column("MMLU", justify="right")
     t.add_column("aider pass@1", justify="right")
-    t.add_column("aider pass@2", justify="right")
+    t.add_column(f"aider pass@{coding_tries}", justify="right")
     t.add_column("TTFT p50 (ms)", justify="right")
     t.add_column("tok/s", justify="right")
     t.add_column("score", justify="right")
@@ -429,9 +460,7 @@ def _table(scores: list[ModelScore], weight: float, ppl_weight: float = 0.0) -> 
             _pass_cell(s, 2),
             _num(s.perf.ttft_ms_p50) if s.perf else "n/a",
             _num(s.perf.tok_s_median) if s.perf else "n/a",
-            f"{s.score:.2f}*" if s.score is not None and s.nonsignificant else (
-                f"{s.score:.2f}" if s.score is not None else "n/a"
-            ),
+            _score_cell(s),
         )
     return t
 
@@ -459,6 +488,8 @@ def _model_entry(s: ModelScore, weight: float, ppl_weight: float = 0.0) -> dict[
         "rank": s.rank,
         "score": s.score,
         "nonsignificant": s.nonsignificant,
+        "missing_components": s.missing_components,
+        "partial": bool(s.missing_components),
         "score_ci_95_half": _score_ci_half(s, weight, ppl_weight),
         "score_components": [
             {"component": n, "weight": round(w, 4), "value_0_100": round(v, 2)}
@@ -592,7 +623,7 @@ def _coding_exercises_table(scores: list[ModelScore]) -> list[str]:
             name = r.get("exercise") or "?"
             oc = r.get("tests_outcomes") or []
             p1 = bool(oc and oc[0])
-            p2 = bool(oc and (len(oc) > 1 and (oc[0] or oc[1])))
+            p2 = any(oc)
             ex.setdefault(name, {})[s.slug] = (p1, p2)
     slugs = [s.slug for s in ranked]
     lines = [
@@ -615,11 +646,17 @@ def _coding_exercises_table(scores: list[ModelScore]) -> list[str]:
             else:
                 cells.append("·")
         lines.append(f"| {name} | " + " | ".join(cells) + " |")
-    lines += ["", "1 = passed on try 1, 2 = passed on try 2 only, · = failed, – = not run"]
+    lines += ["", "1 = passed on try 1, 2 = passed on a later try (not try 1), · = failed, – = not run"]
     return lines
 
 
-def _markdown(scores: list[ModelScore], weight: float, meta: dict, ppl_weight: float = 0.0) -> str:
+def _markdown(
+    scores: list[ModelScore],
+    weight: float,
+    meta: dict,
+    ppl_weight: float = 0.0,
+    coding_tries: int = 2,
+) -> str:
     """Render the full markdown report.
 
     Args:
@@ -627,6 +664,7 @@ def _markdown(scores: list[ModelScore], weight: float, meta: dict, ppl_weight: f
         weight: MMLU weight within the non-PPL (capability) half.
         meta: Run metadata (llama-server, config, durations, ...) to list up top.
         ppl_weight: PPL (fidelity) weight of the whole score.
+        coding_tries: Number of polyglot tries (labels the pass@N column/term).
 
     Returns:
         str: The markdown report text.
@@ -637,10 +675,10 @@ def _markdown(scores: list[ModelScore], weight: float, meta: dict, ppl_weight: f
     lines.append(f"- generated: {time.strftime('%Y-%m-%d %H:%M:%S')}")
     for k, v in meta.items():
         lines.append(f"- {k}: {v}")
-    lines.append(f"- composite: `score = {_composite_label(weight, ppl_weight)}`")
+    lines.append(f"- composite: `score = {_composite_label(weight, ppl_weight, coding_tries)}`")
     lines.append("")
     lines.append(
-        "| rank | model | PPL | MMLU | aider pass@1 | aider pass@2 | TTFT p50 (ms) | tok/s | score |"
+        f"| rank | model | PPL | MMLU | aider pass@1 | aider pass@{coding_tries} | TTFT p50 (ms) | tok/s | score |"
     )
     lines.append("|---:|---|---:|---:|---:|---:|---:|---:|---:|")
     ordered = sorted(scores, key=lambda s: (s.rank is None, s.rank or 0))
@@ -655,9 +693,7 @@ def _markdown(scores: list[ModelScore], weight: float, meta: dict, ppl_weight: f
                 p2=_pass_cell(s, 2),
                 ttft=_num(s.perf.ttft_ms_p50) if s.perf else "n/a",
                 tps=_num(s.perf.tok_s_median) if s.perf else "n/a",
-                score=(f"{s.score:.2f}*" if s.nonsignificant else f"{s.score:.2f}")
-                if s.score is not None
-                else "n/a",
+                score=_score_cell(s),
             )
         )
     if any(s.nonsignificant for s in scores):
@@ -665,6 +701,12 @@ def _markdown(scores: list[ModelScore], weight: float, meta: dict, ppl_weight: f
         lines.append(
             "* adjacent-rank difference not significant at the 95% CI level "
             "(PPL bootstrap SE, MMLU ±1.96×SE, coding Wilson CI, propagated into the composite)"
+        )
+    if any(s.missing_components for s in scores):
+        lines.append("")
+        lines.append(
+            "† scored on a subset of components (one or more missing); "
+            "not directly comparable to complete rows"
         )
     lines.append("")
     lines.append("## per-model details")
@@ -676,9 +718,13 @@ def _markdown(scores: list[ModelScore], weight: float, meta: dict, ppl_weight: f
             parts = " + ".join(
                 f"{w:.2f}\u00d7{_COMPONENT_LABELS.get(n, n)}({v:.1f})" for n, w, v in s.score_components
             )
-            ns = " *" if s.nonsignificant else ""
+            ns = (" *" if s.nonsignificant else "") + (" †" if s.missing_components else "")
             lines.append(f"- **score {s.score:.2f}{ns}** = {parts}")
             lines.append("")
+            if s.missing_components:
+                names = ", ".join(_COMPONENT_LABELS.get(n, n) for n in s.missing_components)
+                lines.append(f"- † partial: missing {names} (scored on the remaining components only)")
+                lines.append("")
         lines.append(f"- path: `{s.path}`")
         if s.flags:
             lines.append(f"- per-model flags: `{' '.join(s.flags)}`")
@@ -709,7 +755,7 @@ def _markdown(scores: list[ModelScore], weight: float, meta: dict, ppl_weight: f
                 lines.append(
                     f"- polyglot ({s.coding.languages}, {s.coding.edit_format}): "
                     f"pass@1 {s.coding.pass_rate_1:.1f}% [{lo1:.1f}-{hi1:.1f}], "
-                    f"pass@2 {s.coding.pass_rate_2:.1f}% [{lo2:.1f}-{hi2:.1f}] (Wilson 95% CI) "
+                    f"pass@{coding_tries} {s.coding.pass_rate_2:.1f}% [{lo2:.1f}-{hi2:.1f}] (Wilson 95% CI) "
                     f"({s.coding.completed_tests}/{s.coding.total_tests} tests, {s.coding.duration_s:.0f}s), "
                     f"run dir `{s.coding.run_dir}`"
                 )
@@ -765,12 +811,13 @@ def write_report(
     results_dir = Path(results_dir)
     results_dir.mkdir(parents=True, exist_ok=True)
     meta = meta or {}
+    coding_tries = meta.get("coding_tries") or 2
 
     _mark_nonsignificant(scores, weight, ppl_weight)
-    console.print(_table(scores, weight, ppl_weight))
+    console.print(_table(scores, weight, ppl_weight, coding_tries))
 
     report_md = results_dir / "report.md"
-    report_md.write_text(_markdown(scores, weight, meta, ppl_weight))
+    report_md.write_text(_markdown(scores, weight, meta, ppl_weight, coding_tries))
 
     report_json = results_dir / "report.json"
     report_json.write_text(
@@ -778,7 +825,7 @@ def write_report(
             {
                 "weight_mmlu": weight,
                 "weight_ppl": ppl_weight,
-                "composite": _composite_label(weight, ppl_weight),
+                "composite": _composite_label(weight, ppl_weight, coding_tries),
                 "meta": meta,
                 "models": [_model_entry(s, weight, ppl_weight) for s in scores],
             },

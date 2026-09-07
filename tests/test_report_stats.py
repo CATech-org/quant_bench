@@ -7,7 +7,7 @@ from pathlib import Path
 
 from quant_bench.coding import CodingResult
 from quant_bench.mmlu import MMLUResult
-from quant_bench.report import ModelScore, _mark_nonsignificant, _wilson_ci, write_report
+from quant_bench.report import ModelScore, _coding_exercises_table, _mark_nonsignificant, _wilson_ci, write_report
 
 
 def _mmlu(acc: float, se: float) -> MMLUResult:
@@ -32,7 +32,7 @@ def _mmlu(acc: float, se: float) -> MMLUResult:
 def _coding(outcomes: dict[str, list[bool]]) -> CodingResult:
     n = len(outcomes)
     p1 = sum(1 for oc in outcomes.values() if oc and oc[0])
-    p2 = sum(1 for oc in outcomes.values() if oc and (len(oc) > 1 and (oc[0] or oc[1])))
+    p2 = sum(1 for oc in outcomes.values() if any(oc))
     raw = [
         {"exercise": name, "language": "python", "tests_outcomes": oc, "prompt_tokens": 0, "completion_tokens": 0}
         for name, oc in outcomes.items()
@@ -137,3 +137,34 @@ def test_write_report_includes_server_error(tmp_path: Path) -> None:
     assert "- server error: boom" in md.read_text()
     data = json.loads(js.read_text())
     assert data["models"][0]["server_error"] == "boom"
+
+
+def test_coding_exercises_table_counts_later_tries() -> None:
+    s = ModelScore(label="a", slug="a", path="/p/a", flags=[])
+    s.coding = CodingResult(
+        model="m",
+        edit_format="whole",
+        languages="python",
+        tries=3,
+        pass_rate_1=0.0,
+        pass_rate_2=100.0,
+        pass_num_1=0,
+        pass_num_2=1,
+        completed_tests=1,
+        total_tests=1,
+        duration_s=1.0,
+        prompt_tokens=0,
+        completion_tokens=0,
+        run_dir=Path("/tmp/run"),
+        raw=[
+            {
+                "exercise": "ex1",
+                "language": "python",
+                "tests_outcomes": [False, False, True],  # passed on the 3rd try
+                "prompt_tokens": 0,
+                "completion_tokens": 0,
+            }
+        ],
+    )
+    lines = _coding_exercises_table([s])
+    assert "| ex1 | 2 |" in lines  # passed on a later try (not try 1), matching the aggregate

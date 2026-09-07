@@ -137,7 +137,59 @@ def _count_tokens(text: str, tokenizer: Optional[str]) -> int:
     return max(0, len(text)) // 4
 
 
-def build_ppl_args(model_path: Path, reference: Path, server: ServerProfile, ctx: int) -> list[str]:
+# Per-model flags that llama-perplexity understands and that control device placement /
+# offload. These are forwarded to the PPL run so it loads the model the same way the
+# server did (e.g. --main-gpu / --split-mode on a multi-GPU box). Serving-only flags
+# (e.g. --jinja, --port, --alias) are deliberately omitted: llama-perplexity rejects them.
+PPL_DEVICE_FLAGS: frozenset[str] = frozenset(
+    {
+        "--main-gpu",
+        "--split-mode",
+        "-sm",
+        "--tensor-split",
+        "--no-mmap",
+        "--mlock",
+        "--numa",
+        "--flash-attn",
+        "-fa",
+        "--no-kv-offload",
+        "--cache-type-k",
+        "--cache-type-v",
+        "--n-gpu-layers",
+        "-ngl",
+    }
+)
+
+
+def _select_ppl_flags(flags: list[str]) -> list[str]:
+    """Keep only the per-model flags in ``PPL_DEVICE_FLAGS`` (plus each one's value token).
+
+    Args:
+        flags: The flat per-model llama-server flags (``["--main-gpu", "0", ...]``).
+
+    Returns:
+        list[str]: The PPL-safe device flags, preserving flag/value pairing.
+    """
+    out: list[str] = []
+    i = 0
+    while i < len(flags):
+        tok = flags[i]
+        if tok in PPL_DEVICE_FLAGS:
+            out.append(tok)
+            if i + 1 < len(flags) and not flags[i + 1].startswith("-"):
+                out.append(flags[i + 1])  # this flag's value
+                i += 1
+        i += 1
+    return out
+
+
+def build_ppl_args(
+    model_path: Path,
+    reference: Path,
+    server: ServerProfile,
+    ctx: int,
+    extra_flags: Optional[list[str]] = None,
+) -> list[str]:
     """Command-line args for llama-perplexity, honoring the profile's device settings.
 
     Args:
@@ -145,6 +197,8 @@ def build_ppl_args(model_path: Path, reference: Path, server: ServerProfile, ctx
         reference: Path to the reference text file.
         server: The server profile (provides shared device/thread flags).
         ctx: Context window (``-c``) for the perplexity run.
+        extra_flags: Per-model llama-server flags; the PPL-safe device subset is appended
+            so the perplexity run uses the same device placement as the server.
 
     Returns:
         list[str]: argv tokens for llama-perplexity (excluding the binary itself).
@@ -160,6 +214,7 @@ def build_ppl_args(model_path: Path, reference: Path, server: ServerProfile, ctx
         "-sm",
         "none",
         "--no-warmup",
+        *_select_ppl_flags(extra_flags or []),
     ]
 
 
@@ -173,6 +228,7 @@ def run_ppl(
     runs: int = DEFAULT_PPL_RUNS,
     timeout: float = DEFAULT_PPL_TIMEOUT,
     tokenizer: Optional[str] = None,
+    extra_flags: Optional[list[str]] = None,
 ) -> PPLResult:
     """Run llama-perplexity ``runs`` times and aggregate the results.
 
@@ -185,6 +241,7 @@ def run_ppl(
         runs: Number of runs to perform.
         timeout: Per-run timeout in seconds.
         tokenizer: HuggingFace tokenizer for an exact token count, or ``None``.
+        extra_flags: Per-model llama-server flags; the PPL-safe device subset is applied.
 
     Returns:
         PPLResult: Mean perplexity, standard error, and per-run details.
@@ -198,7 +255,7 @@ def run_ppl(
         raise PPLError(f"PPL reference file not found: {reference}")
     tokens = _count_tokens(reference.read_text(encoding="utf-8", errors="ignore"), tokenizer)
 
-    args = build_ppl_args(model_path, reference, server, ctx)
+    args = build_ppl_args(model_path, reference, server, ctx, extra_flags)
     cmd = [str(binary), *args]
     ppls: list[float] = []
     ses: list[Optional[float]] = []

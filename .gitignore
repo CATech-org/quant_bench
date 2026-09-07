@@ -12,3 +12,4 @@ tmp.benchmarks/
 local/
 .env
 *.log
+.codegraph

@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 import quant_bench.runner as runner
 from quant_bench.coding import CodingResult
 from quant_bench.config import LlamaServerFlags, ModelSpec, ServerProfile
@@ -196,10 +198,29 @@ def test_run_model_catches_server_error(monkeypatch):
     monkeypatch.setattr(runner, "_run_mmlu_and_perf", boom)
     coding_called = []
     monkeypatch.setattr(runner, "_run_coding", lambda *a: coding_called.append(1))
-    monkeypatch.setattr(runner, "_run_ppl", lambda *a: None)
+    ppl_called = []
+    monkeypatch.setattr(runner, "_run_ppl", lambda *a: ppl_called.append(1))
     score = runner.run_model(cfg, _model())
-    assert coding_called == []  # subsequent stages are skipped after a server error
-    assert score.coding_error == "server error: boom"
+    assert coding_called == []  # subsequent serving stages are skipped after a server error
+    assert ppl_called == [1]  # PPL is independent of the servers and still runs
+    assert score.server_error == "boom"
+    assert score.coding_error is None  # a server failure is not a coding error
+
+
+def test_run_model_coding_server_failure_runs_ppl(monkeypatch):
+    cfg = _cfg()
+    monkeypatch.setattr(runner, "_run_mmlu_and_perf", lambda *a: None)
+
+    def coding_boom(*a, **k):
+        raise ServerError("coding server boom")
+
+    monkeypatch.setattr(runner, "_run_coding", coding_boom)
+    ppl_called = []
+    monkeypatch.setattr(runner, "_run_ppl", lambda *a: ppl_called.append(1))
+    score = runner.run_model(cfg, _model())
+    assert ppl_called == [1]  # PPL still runs after a coding-server failure
+    assert score.server_error == "coding server boom"
+    assert score.coding_error is None
 
 
 def test_run_mmlu_and_perf_runs_both(monkeypatch):
@@ -267,6 +288,30 @@ def test_run_coding_captures_error(monkeypatch):
     score = _blank_score()
     runner._run_coding(_cfg(), _flags(), _model(), score)
     assert "coding broke" in score.coding_error
+
+
+def test_run_coding_server_failure_propagates(monkeypatch):
+    class _FailingServer:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            raise ServerError("no server for you")
+
+        def stop(self):
+            pass
+
+        @property
+        def url(self):
+            return "http://127.0.0.1:8080"
+
+    monkeypatch.setattr(runner, "LlamaServer", _FailingServer)
+    monkeypatch.setattr(runner, "run_coding", lambda **kw: pytest.fail("benchmark should not run"))
+    score = _blank_score()
+    with pytest.raises(ServerError):
+        runner._run_coding(_cfg(), _flags(), _model(), score)
+    assert score.coding is None
+    assert score.coding_error is None  # a server-start failure is not a coding error
 
 
 def test_run_ppl_unavailable(monkeypatch):

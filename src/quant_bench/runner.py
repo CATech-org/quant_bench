@@ -107,8 +107,9 @@ def run_model(cfg: RunConfig, model: ModelSpec) -> ModelScore:
 
     Serves the model for MMLU/perf (server #1), re-serves it with the coding
     determinism fix for the polyglot benchmark (server #2), then runs PPL as a
-    separate process. Per-stage failures are captured on the returned score; a
-    server that fails to start is recorded as a coding-stage server error.
+    separate process. Per-stage failures are captured on the returned score. A
+    serving-server that fails to start is recorded in ``server_error`` and skips
+    the remaining serving stages; PPL does not use a server, so it always runs.
 
     Args:
         cfg: The resolved run settings.
@@ -129,10 +130,10 @@ def run_model(cfg: RunConfig, model: ModelSpec) -> ModelScore:
     try:
         _run_mmlu_and_perf(cfg, server_flags, model, score)
         _run_coding(cfg, server_flags, model, score)
-        _run_ppl(cfg, model, score)
     except ServerError as e:
         console.print(f"[red]server error:[/red] {e}")
-        score.coding_error = score.coding_error or f"server error: {e}"
+        score.server_error = str(e)
+    _run_ppl(cfg, model, score)
     return score
 
 
@@ -201,7 +202,9 @@ def _run_coding(cfg: RunConfig, flags: LlamaServerFlags, model: ModelSpec, score
     """Server #2: run the polyglot coding benchmark on its own llama-server.
 
     Uses a fresh server with the coding determinism fix, isolated from the
-    MMLU/perf server. A server-start failure is captured as a coding error.
+    MMLU/perf server. A server-start failure propagates as a ``ServerError``
+    (handled by :func:`run_model`); a benchmark failure is captured as a coding
+    error.
 
     Args:
         cfg: The resolved run settings.
@@ -218,8 +221,8 @@ def _run_coding(cfg: RunConfig, flags: LlamaServerFlags, model: ModelSpec, score
         log_path=cfg.results_dir / f"server_{model.slug}_coding.log",
         startup_timeout=cfg.startup_timeout,
     )
+    csrv.start()
     try:
-        csrv.start()
         score.coding = run_coding(
             benchmark_root=cfg.benchmark_root,
             server_url=csrv.url,

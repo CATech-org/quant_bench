@@ -45,6 +45,7 @@ class ModelScore:
         perf_error: perf failure message, if it failed.
         coding_error: coding failure message, if it failed.
         ppl_error: PPL failure message, if it failed.
+        server_error: A llama-server failed to start for this model, if so.
         score: The composite 0-100 score, or ``None`` if no component completed.
         rank: 1-based rank among scored models, or ``None`` if unscored.
         nonsignificant: True if an adjacent-rank gap is within the combined CIs.
@@ -69,6 +70,7 @@ class ModelScore:
     perf_error: Optional[str] = None
     coding_error: Optional[str] = None
     ppl_error: Optional[str] = None
+    server_error: Optional[str] = None
     score: Optional[float] = None
     rank: Optional[int] = None
     nonsignificant: bool = False
@@ -453,6 +455,7 @@ def _model_entry(s: ModelScore, weight: float, ppl_weight: float = 0.0) -> dict[
         "per_model_flags": s.flags,
         "server_cmd": s.server_cmd,
         "server_version": s.server_version,
+        "server_error": s.server_error,
         "rank": s.rank,
         "score": s.score,
         "nonsignificant": s.nonsignificant,
@@ -681,6 +684,8 @@ def _markdown(scores: list[ModelScore], weight: float, meta: dict, ppl_weight: f
             lines.append(f"- per-model flags: `{' '.join(s.flags)}`")
         lines.append(f"- server command: `{s.server_cmd}`")
         lines.append(f"- llama-server: {s.server_version}")
+        if s.server_error:
+            lines.append(f"- server error: {s.server_error}")
         if s.mmlu:
             h = _mmlu_ci_half(s)
             ci = f" ± {h:.2f} pts (95% CI)" if h is not None else ""

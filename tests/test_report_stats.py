@@ -127,3 +127,13 @@ def test_write_report_includes_stats_and_appendices(tmp_path: Path) -> None:
     assert data["models"][0]["nonsignificant"] is True
     assert data["models"][0]["score_ci_95_half"] is not None
     assert len(data["models"][0]["coding"]["pass_rate_2_ci_95"]) == 2
+
+
+def test_write_report_includes_server_error(tmp_path: Path) -> None:
+    a = _score("model-a", 0.30, 0.01, _outcomes(34, 2))
+    a.rank = 1
+    a.server_error = "boom"
+    md, js = write_report([a], weight=0.5, results_dir=tmp_path, meta={})
+    assert "- server error: boom" in md.read_text()
+    data = json.loads(js.read_text())
+    assert data["models"][0]["server_error"] == "boom"

@@ -81,7 +81,7 @@ def _model(slug: str, ppl: float, acc: float, se: float, pass_n: int, n: int = 3
 def test_ppl_normalization_best_is_100():
     a = _model("a", 50.0, 0.25, 0.01, 0)
     b = _model("b", 60.0, 0.25, 0.01, 0)
-    compute_scores([a, b], 0.5, ppl_weight=0.5)
+    compute_scores([a, b], 0.5, weights_ppl=0.5)
     assert a.ppl_score == pytest.approx(100.0)
     assert b.ppl_score == pytest.approx(100.0 * 50.0 / 60.0)
     assert a.rank == 1 and b.rank == 2
@@ -90,7 +90,7 @@ def test_ppl_normalization_best_is_100():
 def test_composite_folds_ppl():
     a = _model("a", 40.0, 0.30, 0.01, 0)
     b = _model("b", 50.0, 0.30, 0.01, 0)
-    compute_scores([a, b], 0.5, ppl_weight=0.5)
+    compute_scores([a, b], 0.5, weights_ppl=0.5)
     # cap = 0.5 * (0.30*100) + 0.5 * 0 = 15 for both
     assert a.score == pytest.approx(0.5 * 100.0 + 0.5 * 15.0)
     assert b.score == pytest.approx(0.5 * (100.0 * 40.0 / 50.0) + 0.5 * 15.0)
@@ -101,14 +101,14 @@ def test_ppl_dominates_for_weak_models():
     # MMLU and coding are at the noise floor for both (weak small model); only PPL differs.
     a = _model("a", 53.0, 0.258, 0.0037, 1)  # e.g. Q3
     b = _model("b", 68.0, 0.261, 0.0037, 0)  # e.g. Q4
-    compute_scores([a, b], 0.5, ppl_weight=0.5)
+    compute_scores([a, b], 0.5, weights_ppl=0.5)
     assert a.rank == 1 and b.rank == 2  # lower PPL wins even though MMLU/coding are a wash
 
 
-def test_ppl_weight_zero_keeps_capability_only():
+def test_weights_ppl_zero_keeps_capability_only():
     a = _model("a", 53.0, 0.258, 0.0037, 1)
     b = _model("b", 68.0, 0.261, 0.0037, 0)
-    compute_scores([a, b], 0.5, ppl_weight=0.0)
+    compute_scores([a, b], 0.5, weights_ppl=0.0)
     assert a.score == pytest.approx(0.5 * 25.8 + 0.5 * (100.0 * 1 / 34))
     assert b.score == pytest.approx(0.5 * 26.1)
     assert a.rank == 1
@@ -117,8 +117,8 @@ def test_ppl_weight_zero_keeps_capability_only():
 def test_ppl_dominant_ranking_is_significant():
     a = _model("a", 53.0, 0.258, 0.0037, 1)
     b = _model("b", 68.0, 0.261, 0.0037, 0)
-    compute_scores([a, b], 0.5, ppl_weight=0.5)
-    _mark_nonsignificant([a, b], 0.5, ppl_weight=0.5)
+    compute_scores([a, b], 0.5, weights_ppl=0.5)
+    _mark_nonsignificant([a, b], 0.5, weights_ppl=0.5)
     # PPL component CI is ~0 (identical runs) and the gap is large -> significant (no '*').
     assert not a.nonsignificant and not b.nonsignificant
 
@@ -126,13 +126,13 @@ def test_ppl_dominant_ranking_is_significant():
 def test_write_report_includes_ppl(tmp_path: Path):
     a = _model("a", 53.0, 0.258, 0.0037, 1)
     b = _model("b", 68.0, 0.261, 0.0037, 0)
-    compute_scores([a, b], 0.5, ppl_weight=0.5)
-    md, js = write_report([a, b], weight=0.5, results_dir=tmp_path, meta={}, ppl_weight=0.5)
+    compute_scores([a, b], 0.5, weights_ppl=0.5)
+    md, js = write_report([a, b], weights_mmlu=0.5, results_dir=tmp_path, meta={}, weights_ppl=0.5)
     text = md.read_text()
     assert "PPL" in text
     assert "x PPL" in text  # composite label mentions the PPL term
     data = json.loads(js.read_text())
-    assert data["weight_ppl"] == 0.5
+    assert data["weights_ppl"] == 0.5
     for m in data["models"]:
         assert m["ppl"] is not None
         assert m["ppl"]["score_0_100"] is not None
@@ -162,7 +162,7 @@ def test_renormalize_ppl_only():
     b = _model("b", 60.0, 0.25, 0.01, 0)
     b.mmlu = None
     b.coding = None  # PPL-only model
-    compute_scores([a, b], 0.5, ppl_weight=0.5)
+    compute_scores([a, b], 0.5, weights_ppl=0.5)
     assert b.score == pytest.approx(b.ppl_score)  # weights renormalize to PPL = 1.0
     assert [n for n, _, _ in b.score_components] == ["ppl"]
     assert b.score_components[0][1] == pytest.approx(1.0)
@@ -172,7 +172,7 @@ def test_renormalize_mmlu_only():
     s = _model("a", 50.0, 0.30, 0.01, 0)
     s.ppl = None
     s.coding = None  # only MMLU remains
-    compute_scores([s], 0.5, ppl_weight=0.5)
+    compute_scores([s], 0.5, weights_ppl=0.5)
     assert s.score == pytest.approx(30.0)
     assert [n for n, _, _ in s.score_components] == ["mmlu"]
 
@@ -181,8 +181,8 @@ def test_ppl_bootstrap_se_keeps_gap_significant():
     # Tight PPL (small SE) -> the ~11-point score gap is well outside the CI -> significant.
     a = _model_with_se("a", 53.0, 0.7, 0.258, 0.0037, 1)
     b = _model_with_se("b", 68.0, 0.7, 0.261, 0.0037, 0)
-    compute_scores([a, b], 0.5, ppl_weight=0.5)
-    _mark_nonsignificant([a, b], 0.5, ppl_weight=0.5)
+    compute_scores([a, b], 0.5, weights_ppl=0.5)
+    _mark_nonsignificant([a, b], 0.5, weights_ppl=0.5)
     assert not a.nonsignificant and not b.nonsignificant
 
 
@@ -190,8 +190,8 @@ def test_ppl_large_se_makes_gap_nonsignificant():
     # Loose PPL (huge SE) -> the same gap is within the CI -> not significant.
     a = _model_with_se("a", 53.0, 30.0, 0.258, 0.0037, 1)
     b = _model_with_se("b", 68.0, 30.0, 0.261, 0.0037, 0)
-    compute_scores([a, b], 0.5, ppl_weight=0.5)
-    _mark_nonsignificant([a, b], 0.5, ppl_weight=0.5)
+    compute_scores([a, b], 0.5, weights_ppl=0.5)
+    _mark_nonsignificant([a, b], 0.5, weights_ppl=0.5)
     assert a.nonsignificant and b.nonsignificant
 
 
@@ -206,8 +206,8 @@ def test_ppl_cell_shows_95_ci():
 def test_write_report_includes_breakdown(tmp_path: Path):
     a = _model_with_se("a", 53.0, 0.7, 0.258, 0.0037, 1)
     b = _model_with_se("b", 68.0, 0.7, 0.261, 0.0037, 0)
-    compute_scores([a, b], 0.5, ppl_weight=0.5)
-    md, js = write_report([a, b], weight=0.5, results_dir=tmp_path, meta={}, ppl_weight=0.5)
+    compute_scores([a, b], 0.5, weights_ppl=0.5)
+    md, js = write_report([a, b], weights_mmlu=0.5, results_dir=tmp_path, meta={}, weights_ppl=0.5)
     data = json.loads(js.read_text())
     for m in data["models"]:
         comps = m["score_components"]
@@ -222,7 +222,7 @@ def test_missing_ppl_marks_partial():
     a = _model("a", 50.0, 0.25, 0.01, 0)
     b = _model("b", 50.0, 0.25, 0.01, 0)
     b.ppl = None  # b has no PPL
-    compute_scores([a, b], 0.5, ppl_weight=0.5)  # default PPL weight -> PPL counts
+    compute_scores([a, b], 0.5, weights_ppl=0.5)  # default PPL weight -> PPL counts
     assert a.missing_components == []
     assert b.missing_components == ["ppl"]
 
@@ -231,7 +231,7 @@ def test_missing_ppl_not_flagged_when_unweighted():
     a = _model("a", 50.0, 0.25, 0.01, 0)
     b = _model("b", 50.0, 0.25, 0.01, 0)
     b.ppl = None
-    compute_scores([a, b], 0.5, ppl_weight=0.0)  # PPL not in the composite
+    compute_scores([a, b], 0.5, weights_ppl=0.0)  # PPL not in the composite
     assert a.missing_components == []
     assert b.missing_components == []
 
@@ -240,8 +240,8 @@ def test_write_report_flags_partial(tmp_path: Path):
     a = _model("a", 53.0, 0.258, 0.0037, 1)
     b = _model("b", 68.0, 0.261, 0.0037, 0)
     b.ppl = None
-    compute_scores([a, b], 0.5, ppl_weight=0.5)
-    md, js = write_report([a, b], weight=0.5, results_dir=tmp_path, meta={}, ppl_weight=0.5)
+    compute_scores([a, b], 0.5, weights_ppl=0.5)
+    md, js = write_report([a, b], weights_mmlu=0.5, results_dir=tmp_path, meta={}, weights_ppl=0.5)
     text = md.read_text()
     assert "†" in text  # partial marker on the score and in the legend
     assert "† partial: missing PPL" in text  # per-model note
@@ -264,7 +264,7 @@ def test_composite_label_reflects_tries():
 def test_write_report_labels_tries(tmp_path: Path):
     a = _model("a", 53.0, 0.258, 0.0037, 1)
     b = _model("b", 68.0, 0.261, 0.0037, 0)
-    compute_scores([a, b], 0.5, ppl_weight=0.5)
-    md, js = write_report([a, b], weight=0.5, results_dir=tmp_path, meta={"coding_tries": 3}, ppl_weight=0.5)
+    compute_scores([a, b], 0.5, weights_ppl=0.5)
+    md, js = write_report([a, b], weights_mmlu=0.5, results_dir=tmp_path, meta={"coding_tries": 3}, weights_ppl=0.5)
     assert "aider pass@3" in md.read_text()
     assert "pass@3" in json.loads(js.read_text())["composite"]

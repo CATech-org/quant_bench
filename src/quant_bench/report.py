@@ -80,24 +80,24 @@ class ModelScore:
     missing_components: list[str] = field(default_factory=list)
 
 
-def _component_weights(mmlu_weight: float, ppl_weight: float) -> tuple[float, float, float]:
+def _component_weights(weights_mmlu: float, weights_ppl: float) -> tuple[float, float, float]:
     """Base (pre-renormalization) weights for the three 0-100 components.
 
     The final benchmark score is a flat weighted sum:
         score = w_ppl * PPL_fidelity + w_mmlu * MMLU% + w_coding * aider-pass@2%
-    where w_ppl = ppl_weight and the remaining (1 - ppl_weight) is split between MMLU and
-    aider pass@2 by mmlu_weight.
+    where w_ppl = weights_ppl and the remaining (1 - weights_ppl) is split between MMLU and
+    aider pass@2 by weights_mmlu.
 
     Args:
-        mmlu_weight: MMLU weight within the non-PPL (capability) half.
-        ppl_weight: PPL (fidelity) weight of the whole score.
+        weights_mmlu: MMLU's share of the non-PPL remainder (rest goes to aider).
+        weights_ppl: PPL (fidelity) weight of the whole score.
 
     Returns:
         tuple[float, float, float]: ``(w_ppl, w_mmlu, w_coding)``.
     """
-    w_ppl = ppl_weight
-    w_mmlu = (1.0 - ppl_weight) * mmlu_weight
-    w_coding = (1.0 - ppl_weight) * (1.0 - mmlu_weight)
+    w_ppl = weights_ppl
+    w_mmlu = (1.0 - weights_ppl) * weights_mmlu
+    w_coding = (1.0 - weights_ppl) * (1.0 - weights_mmlu)
     return w_ppl, w_mmlu, w_coding
 
 
@@ -120,7 +120,7 @@ def _component_value(s: ModelScore, name: str) -> Optional[float]:
     return None
 
 
-def _composite_components(s: ModelScore, mmlu_weight: float, ppl_weight: float) -> list[tuple[str, float, float]]:
+def _composite_components(s: ModelScore, weights_mmlu: float, weights_ppl: float) -> list[tuple[str, float, float]]:
     """The present components as [(name, normalized_weight, value_0_100)], weights renormalized to sum to 1.
 
     A missing metric simply drops out and the remaining weights are rescaled, so a partial run
@@ -128,14 +128,14 @@ def _composite_components(s: ModelScore, mmlu_weight: float, ppl_weight: float) 
 
     Args:
         s: The model's results.
-        mmlu_weight: MMLU weight within the non-PPL (capability) half.
-        ppl_weight: PPL (fidelity) weight of the whole score.
+        weights_mmlu: MMLU's share of the non-PPL remainder (rest goes to aider).
+        weights_ppl: PPL (fidelity) weight of the whole score.
 
     Returns:
         list[tuple[str, float, float]]: The present (name, weight, value) triples,
         with weights renormalized to sum to 1.
     """
-    w_ppl, w_mmlu, w_coding = _component_weights(mmlu_weight, ppl_weight)
+    w_ppl, w_mmlu, w_coding = _component_weights(weights_mmlu, weights_ppl)
     raw: list[tuple[str, float, float]] = []
     for name, w in (("ppl", w_ppl), ("mmlu", w_mmlu), ("coding", w_coding)):
         if w <= 0.0:
@@ -149,7 +149,7 @@ def _composite_components(s: ModelScore, mmlu_weight: float, ppl_weight: float) 
     return [(n, w / total, v) for n, w, v in raw]
 
 
-def compute_scores(scores: list[ModelScore], mmlu_weight: float, ppl_weight: float = 0.0) -> None:
+def compute_scores(scores: list[ModelScore], weights_mmlu: float, weights_ppl: float = 0.0) -> None:
     """Compute each model's composite score and 1-based rank (in place).
 
     Normalizes PPL across the scored set (best/lowest PPL -> 100), propagates the
@@ -158,8 +158,8 @@ def compute_scores(scores: list[ModelScore], mmlu_weight: float, ppl_weight: flo
 
     Args:
         scores: The models' results, mutated in place (score, components, rank).
-        mmlu_weight: MMLU weight within the non-PPL (capability) half.
-        ppl_weight: PPL (fidelity) weight of the whole score.
+        weights_mmlu: MMLU's share of the non-PPL remainder (rest goes to aider).
+        weights_ppl: PPL (fidelity) weight of the whole score.
     """
     # PPL is lower-is-better and unbounded, so normalize across the scored set:
     # the best (lowest) PPL -> 100, others scale by the ratio. This is what makes a
@@ -175,7 +175,7 @@ def compute_scores(scores: list[ModelScore], mmlu_weight: float, ppl_weight: flo
             if s.ppl.ppl_se is not None and s.ppl.ppl > 0:
                 s.ppl_score_se = (100.0 * min_ppl / (s.ppl.ppl * s.ppl.ppl)) * s.ppl.ppl_se
     for s in scores:
-        comps = _composite_components(s, mmlu_weight, ppl_weight)
+        comps = _composite_components(s, weights_mmlu, weights_ppl)
         s.score_components = comps
         s.score = sum(w * v for _, w, v in comps) if comps else None
     ranked = [s for s in scores if s.score is not None]
@@ -294,7 +294,7 @@ def _ppl_ci_half(s: ModelScore) -> Optional[float]:
     return math.sqrt(sum(x * x for x in parts))
 
 
-def _score_ci_half(s: ModelScore, mmlu_weight: float, ppl_weight: float = 0.0) -> Optional[float]:
+def _score_ci_half(s: ModelScore, weights_mmlu: float, weights_ppl: float = 0.0) -> Optional[float]:
     """Half-width (score points) of the 95% CI on the composite score (PPL + MMLU + coding).
 
     Weighted RMS of the present components' CIs, using the same renormalized weights as the
@@ -302,14 +302,14 @@ def _score_ci_half(s: ModelScore, mmlu_weight: float, ppl_weight: float = 0.0) -
 
     Args:
         s: The model's results.
-        mmlu_weight: MMLU weight within the non-PPL (capability) half.
-        ppl_weight: PPL (fidelity) weight of the whole score.
+        weights_mmlu: MMLU's share of the non-PPL remainder (rest goes to aider).
+        weights_ppl: PPL (fidelity) weight of the whole score.
 
     Returns:
         Optional[float]: The composite CI half-width in score points, or ``None`` if
         it cannot be determined.
     """
-    comps = _composite_components(s, mmlu_weight, ppl_weight)
+    comps = _composite_components(s, weights_mmlu, weights_ppl)
     if not comps:
         return None
     comp_ci = {"ppl": _ppl_ci_half(s), "mmlu": _mmlu_ci_half(s), "coding": _coding_ci_half(s)}
@@ -319,19 +319,19 @@ def _score_ci_half(s: ModelScore, mmlu_weight: float, ppl_weight: float = 0.0) -
     return math.sqrt(sum((w * comp_ci[name]) ** 2 for name, w, _ in comps))
 
 
-def _mark_nonsignificant(scores: list[ModelScore], mmlu_weight: float, ppl_weight: float = 0.0) -> None:
+def _mark_nonsignificant(scores: list[ModelScore], weights_mmlu: float, weights_ppl: float = 0.0) -> None:
     """Flag models whose adjacent-rank score difference is within the combined 95% CIs.
 
     Args:
         scores: The models' results, mutated in place (``nonsignificant``).
-        mmlu_weight: MMLU weight within the non-PPL (capability) half.
-        ppl_weight: PPL (fidelity) weight of the whole score.
+        weights_mmlu: MMLU's share of the non-PPL remainder (rest goes to aider).
+        weights_ppl: PPL (fidelity) weight of the whole score.
     """
     for s in scores:
         s.nonsignificant = False
     ranked = sorted((s for s in scores if s.rank is not None), key=lambda s: s.rank)
     for a, b in zip(ranked, ranked[1:], strict=False):
-        ha, hb = _score_ci_half(a, mmlu_weight, ppl_weight), _score_ci_half(b, mmlu_weight, ppl_weight)
+        ha, hb = _score_ci_half(a, weights_mmlu, weights_ppl), _score_ci_half(b, weights_mmlu, weights_ppl)
         if ha is None or hb is None or a.score is None or b.score is None:
             continue
         if a.score - b.score <= math.sqrt(ha * ha + hb * hb):
@@ -390,22 +390,22 @@ def _ppl_cell(s: ModelScore) -> str:
     return f"{s.ppl.ppl:.2f}"
 
 
-def _composite_label(weight: float, ppl_weight: float, coding_tries: int = 2) -> str:
-    """Human-readable composite formula. `weight` = MMLU weight within the capability half.
+def _composite_label(weights_mmlu: float, weights_ppl: float, coding_tries: int = 2) -> str:
+    """Human-readable composite formula. ``weights_mmlu`` = MMLU's share of the non-PPL remainder.
 
     Args:
-        weight: MMLU weight within the non-PPL (capability) half.
-        ppl_weight: PPL (fidelity) weight of the whole score.
+        weights_mmlu: MMLU's share of the non-PPL remainder (rest goes to aider).
+        weights_ppl: PPL (fidelity) weight of the whole score.
         coding_tries: Number of polyglot tries (labels the pass@N term).
 
     Returns:
         str: A human-readable formula for the composite score.
     """
-    if ppl_weight <= 0.0:
-        return f"{weight:.2f} x MMLU + {1 - weight:.2f} x aider pass@{coding_tries}"
-    w_ppl = ppl_weight
-    w_mmlu = (1.0 - ppl_weight) * weight
-    w_coding = (1.0 - ppl_weight) * (1.0 - weight)
+    if weights_ppl <= 0.0:
+        return f"{weights_mmlu:.2f} x MMLU + {1 - weights_mmlu:.2f} x aider pass@{coding_tries}"
+    w_ppl = weights_ppl
+    w_mmlu = (1.0 - weights_ppl) * weights_mmlu
+    w_coding = (1.0 - weights_ppl) * (1.0 - weights_mmlu)
     return f"{w_ppl:.2f} x PPL + {w_mmlu:.2f} x MMLU + {w_coding:.2f} x aider pass@{coding_tries}"
 
 
@@ -426,20 +426,20 @@ def _score_cell(s: ModelScore) -> str:
 
 
 def _table(
-    scores: list[ModelScore], weight: float, ppl_weight: float = 0.0, coding_tries: int = 2
+    scores: list[ModelScore], weights_mmlu: float, weights_ppl: float = 0.0, coding_tries: int = 2
 ) -> Table:
     """Build a rich console table of the results, sorted by rank.
 
     Args:
         scores: The models' results.
-        weight: MMLU weight within the non-PPL (capability) half.
-        ppl_weight: PPL (fidelity) weight of the whole score.
+        weights_mmlu: MMLU's share of the non-PPL remainder (rest goes to aider).
+        weights_ppl: PPL (fidelity) weight of the whole score.
         coding_tries: Number of polyglot tries (labels the pass@N column).
 
     Returns:
         Table: The populated rich table for display.
     """
-    t = Table(title=f"quant-bench results (score = {_composite_label(weight, ppl_weight, coding_tries)})")
+    t = Table(title=f"quant-bench results (score = {_composite_label(weights_mmlu, weights_ppl, coding_tries)})")
     t.add_column("rank", justify="right")
     t.add_column("model")
     t.add_column("PPL", justify="right")
@@ -465,13 +465,13 @@ def _table(
     return t
 
 
-def _model_entry(s: ModelScore, weight: float, ppl_weight: float = 0.0) -> dict[str, Any]:
+def _model_entry(s: ModelScore, weights_mmlu: float, weights_ppl: float = 0.0) -> dict[str, Any]:
     """Build the per-model JSON report entry.
 
     Args:
         s: The model's results.
-        weight: MMLU weight within the non-PPL (capability) half.
-        ppl_weight: PPL (fidelity) weight of the whole score.
+        weights_mmlu: MMLU's share of the non-PPL remainder (rest goes to aider).
+        weights_ppl: PPL (fidelity) weight of the whole score.
 
     Returns:
         dict[str, Any]: The JSON-serializable entry for one model.
@@ -490,7 +490,7 @@ def _model_entry(s: ModelScore, weight: float, ppl_weight: float = 0.0) -> dict[
         "nonsignificant": s.nonsignificant,
         "missing_components": s.missing_components,
         "partial": bool(s.missing_components),
-        "score_ci_95_half": _score_ci_half(s, weight, ppl_weight),
+        "score_ci_95_half": _score_ci_half(s, weights_mmlu, weights_ppl),
         "score_components": [
             {"component": n, "weight": round(w, 4), "value_0_100": round(v, 2)}
             for n, w, v in s.score_components
@@ -652,18 +652,18 @@ def _coding_exercises_table(scores: list[ModelScore]) -> list[str]:
 
 def _markdown(
     scores: list[ModelScore],
-    weight: float,
+    weights_mmlu: float,
     meta: dict,
-    ppl_weight: float = 0.0,
+    weights_ppl: float = 0.0,
     coding_tries: int = 2,
 ) -> str:
     """Render the full markdown report.
 
     Args:
         scores: The models' results.
-        weight: MMLU weight within the non-PPL (capability) half.
+        weights_mmlu: MMLU's share of the non-PPL remainder (rest goes to aider).
         meta: Run metadata (llama-server, config, durations, ...) to list up top.
-        ppl_weight: PPL (fidelity) weight of the whole score.
+        weights_ppl: PPL (fidelity) weight of the whole score.
         coding_tries: Number of polyglot tries (labels the pass@N column/term).
 
     Returns:
@@ -675,7 +675,7 @@ def _markdown(
     lines.append(f"- generated: {time.strftime('%Y-%m-%d %H:%M:%S')}")
     for k, v in meta.items():
         lines.append(f"- {k}: {v}")
-    lines.append(f"- composite: `score = {_composite_label(weight, ppl_weight, coding_tries)}`")
+    lines.append(f"- composite: `score = {_composite_label(weights_mmlu, weights_ppl, coding_tries)}`")
     lines.append("")
     lines.append(
         f"| rank | model | PPL | MMLU | aider pass@1 | aider pass@{coding_tries} | TTFT p50 (ms) | tok/s | score |"
@@ -790,20 +790,20 @@ def _markdown(
 def write_report(
     scores: list[ModelScore],
     *,
-    weight: float,
+    weights_mmlu: float,
     results_dir: Path,
     meta: Optional[dict] = None,
-    ppl_weight: float = 0.0,
+    weights_ppl: float = 0.0,
 ) -> tuple[Path, Path]:
     """Mark significance, print the summary table, and write the report files.
 
     Args:
         scores: The models' results.
-        weight: MMLU weight within the non-PPL (capability) half.
+        weights_mmlu: MMLU's share of the non-PPL remainder (rest goes to aider).
         results_dir: Directory to write ``report.md`` and ``report.json`` into
             (created if missing).
         meta: Run metadata to embed in the reports.
-        ppl_weight: PPL (fidelity) weight of the whole score.
+        weights_ppl: PPL (fidelity) weight of the whole score.
 
     Returns:
         tuple[Path, Path]: The paths to the written markdown and JSON reports.
@@ -813,21 +813,21 @@ def write_report(
     meta = meta or {}
     coding_tries = meta.get("coding_tries") or 2
 
-    _mark_nonsignificant(scores, weight, ppl_weight)
-    console.print(_table(scores, weight, ppl_weight, coding_tries))
+    _mark_nonsignificant(scores, weights_mmlu, weights_ppl)
+    console.print(_table(scores, weights_mmlu, weights_ppl, coding_tries))
 
     report_md = results_dir / "report.md"
-    report_md.write_text(_markdown(scores, weight, meta, ppl_weight, coding_tries))
+    report_md.write_text(_markdown(scores, weights_mmlu, meta, weights_ppl, coding_tries))
 
     report_json = results_dir / "report.json"
     report_json.write_text(
         json.dumps(
             {
-                "weight_mmlu": weight,
-                "weight_ppl": ppl_weight,
-                "composite": _composite_label(weight, ppl_weight, coding_tries),
+                "weights_mmlu": weights_mmlu,
+                "weights_ppl": weights_ppl,
+                "composite": _composite_label(weights_mmlu, weights_ppl, coding_tries),
                 "meta": meta,
-                "models": [_model_entry(s, weight, ppl_weight) for s in scores],
+                "models": [_model_entry(s, weights_mmlu, weights_ppl) for s in scores],
             },
             indent=2,
             default=str,

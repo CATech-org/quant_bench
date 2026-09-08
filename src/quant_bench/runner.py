@@ -52,7 +52,7 @@ class RunConfig:
         ppl_reference: Path to the PPL reference text.
         ppl_ctx: Context window for the PPL probe.
         ppl_runs: PPL runs per model.
-        ppl_weight: PPL weight in the composite score.
+        weights_ppl: PPL (fidelity) weight of the composite score.
         ppl_available: Whether the PPL stage will run.
         perplexity_bin: Path to llama-perplexity, if available.
     """
@@ -80,7 +80,7 @@ class RunConfig:
     ppl_reference: Path
     ppl_ctx: int
     ppl_runs: int
-    ppl_weight: float
+    weights_ppl: float
     ppl_available: bool
     perplexity_bin: Optional[str]
 
@@ -301,6 +301,6 @@ def build_meta(cfg: RunConfig, duration_s: float) -> dict:
         "coding_limit": None if cfg.skip_coding else cfg.coding_limit,
         "coding_kv_fix": None if cfg.skip_coding else cfg.coding_kv_fix,
         "coding_tries": cfg.tries,
-        "ppl_weight": None if not cfg.ppl_available else cfg.ppl_weight,
+        "weights_ppl": None if not cfg.ppl_available else cfg.weights_ppl,
         "ppl_reference": None if not cfg.ppl_available else str(cfg.ppl_reference),
     }

@@ -47,7 +47,7 @@ def _cfg(**overrides) -> runner.RunConfig:
         ppl_reference=Path("scripts/ppl_ref.txt"),
         ppl_ctx=1024,
         ppl_runs=2,
-        ppl_weight=0.5,
+        weights_ppl=0.5,
         ppl_available=True,
         perplexity_bin="/bin/llama-perplexity",
     )
@@ -160,7 +160,7 @@ def test_build_meta_all_stages():
     assert meta["total_duration_s"] == 123.5
     assert meta["mmlu_task"] == "mmlu"
     assert meta["languages"] == "python"
-    assert meta["ppl_weight"] == 0.5
+    assert meta["weights_ppl"] == 0.5
     assert meta["ppl_reference"] == str(cfg.ppl_reference)
 
 
@@ -171,7 +171,7 @@ def test_build_meta_skips_record_none():
     assert meta["languages"] is None
     assert meta["coding_limit"] is None
     assert meta["coding_kv_fix"] is None
-    assert meta["ppl_weight"] is None
+    assert meta["weights_ppl"] is None
     assert meta["ppl_reference"] is None
 
 

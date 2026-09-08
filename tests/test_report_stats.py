@@ -116,7 +116,7 @@ def test_write_report_includes_stats_and_appendices(tmp_path: Path) -> None:
     a = _score("model-a", 0.30, 0.01, _outcomes(34, 2))
     b = _score("model-b", 0.29, 0.01, _outcomes(34, 1))
     a.rank, b.rank = 1, 2
-    md, js = write_report([a, b], weight=0.5, results_dir=tmp_path, meta={})
+    md, js = write_report([a, b], weights_mmlu=0.5, results_dir=tmp_path, meta={})
     text = md.read_text()
     assert "not significant" in text
     assert "±" in text
@@ -133,7 +133,7 @@ def test_write_report_includes_server_error(tmp_path: Path) -> None:
     a = _score("model-a", 0.30, 0.01, _outcomes(34, 2))
     a.rank = 1
     a.server_error = "boom"
-    md, js = write_report([a], weight=0.5, results_dir=tmp_path, meta={})
+    md, js = write_report([a], weights_mmlu=0.5, results_dir=tmp_path, meta={})
     assert "- server error: boom" in md.read_text()
     data = json.loads(js.read_text())
     assert data["models"][0]["server_error"] == "boom"

@@ -6,5 +6,5 @@ uv run quant-bench run \
   --config models.yaml \
   --results-dir results/gemma \
   --port 8126 \
-  --weights 0.5 \
+  --weights-mmlu 0.5 \
   --yes

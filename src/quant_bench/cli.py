@@ -15,7 +15,6 @@ warnings.filterwarnings("ignore", message=".*doesn't match a supported version.*
 
 import click
 from rich.console import Console
-from rich.prompt import FloatPrompt
 
 from quant_bench.coding import CodingError, _total_exercises, find_benchmarks
 from quant_bench.config import ConfigError, ModelSpec, ServerProfile, load_models
@@ -186,8 +185,8 @@ def _validate_run_options(
     *,
     skip_mmlu: bool,
     mmlu_task: str,
-    weights: Optional[float],
-    ppl_weight: float,
+    weights_mmlu: float,
+    weights_ppl: float,
     coding_kv_fix: str,
     skip_ppl: bool,
     ppl_reference: Path,
@@ -197,18 +196,18 @@ def _validate_run_options(
     Args:
         skip_mmlu: Whether the MMLU stage is skipped.
         mmlu_task: The MMLU task name.
-        weights: Explicit MMLU weight, or ``None`` to prompt.
-        ppl_weight: PPL weight in the composite score.
+        weights_mmlu: MMLU's share of the non-PPL remainder, 0.0-1.0.
+        weights_ppl: PPL (fidelity) weight of the composite score, 0.0-1.0.
         coding_kv_fix: Coding-server determinism fix.
         skip_ppl: Whether the PPL stage is skipped.
         ppl_reference: Path to the PPL reference text.
     """
     if not skip_mmlu and mmlu_task not in ("mmlu", "mmlu_generative"):
         _fail(f"unknown --mmlu-task {mmlu_task!r} (use mmlu or mmlu_generative)")
-    if weights is not None and not (0.0 <= weights <= 1.0):
-        _fail("--weights must be between 0.0 and 1.0")
-    if not (0.0 <= ppl_weight <= 1.0):
-        _fail("--ppl-weight must be between 0.0 and 1.0")
+    if not (0.0 <= weights_mmlu <= 1.0):
+        _fail("--weights-mmlu must be between 0.0 and 1.0")
+    if not (0.0 <= weights_ppl <= 1.0):
+        _fail("--weights-ppl must be between 0.0 and 1.0")
     if coding_kv_fix not in ("f16", "no-cache", "off"):
         _fail("--coding-kv-fix must be one of: f16, no-cache, off")
     if not skip_ppl and not Path(ppl_reference).expanduser().is_file():
@@ -329,10 +328,9 @@ def _run_preflight(
     languages: str,
     coding_limit: Optional[int],
     tries: int,
-    weights: Optional[float],
     yes: bool,
-) -> float:
-    """Print the runtime estimate + scope, confirm, and resolve the MMLU weight.
+) -> None:
+    """Print the runtime estimate + scope and confirm before running.
 
     Args:
         n_models: Number of models in the config.
@@ -345,11 +343,7 @@ def _run_preflight(
         languages: Comma-separated polyglot languages.
         coding_limit: Max polyglot tests, if any.
         tries: Number of repair-loop tries per test.
-        weights: Explicit MMLU weight, or ``None`` to prompt.
         yes: Whether to skip the confirmation prompt.
-
-    Returns:
-        float: The MMLU weight to use for the composite score.
     """
     coding_attempts: Optional[int] = None
     if not skip_coding:
@@ -373,15 +367,6 @@ def _run_preflight(
     if not yes and not click.confirm("Continue?"):
         console.print("Aborted.")
         sys.exit(0)
-    if weights is None:
-        weight = FloatPrompt.ask(
-            "MMLU weight for the composite score (0.0-1.0, rest goes to aider coding)", default=0.5
-        )
-        while not (0.0 <= weight <= 1.0):
-            weight = FloatPrompt.ask("Enter a weight between 0.0 and 1.0", default=0.5)
-    else:
-        weight = float(weights)
-    return weight
 
 
 @app.command()
@@ -455,7 +440,11 @@ def _run_preflight(
 @click.option("--perf-requests", type=int, default=20, show_default=True)
 @click.option("--perf-max-tokens", type=int, default=128, show_default=True)
 @click.option(
-    "--weights", type=float, default=None, help="MMLU weight for the composite score, 0.0-1.0 (skips the prompt)"
+    "--weights-mmlu",
+    type=float,
+    default=0.5,
+    show_default=True,
+    help="MMLU's share of the non-PPL remainder, 0.0-1.0 (default 0.5 splits it evenly between MMLU and aider)",
 )
 @click.option(
     "--results-dir",
@@ -484,11 +473,11 @@ def _run_preflight(
 )
 @click.option("--skip-ppl", is_flag=True, default=False)
 @click.option(
-    "--ppl-weight",
+    "--weights-ppl",
     type=float,
     default=0.5,
     show_default=True,
-    help="PPL (fidelity) weight in the composite score, 0.0-1.0",
+    help="PPL (fidelity) weight of the composite score, 0.0-1.0 (0 = MMLU+coding-only composite)",
 )
 @click.option("--ppl-ctx", type=int, default=1024, show_default=True, help="Context window for the PPL probe")
 @click.option("--ppl-runs", type=int, default=2, show_default=True, help="PPL runs per model (mean + reproducibility)")
@@ -520,7 +509,7 @@ def run(
     coding_limit: Optional[int],
     perf_requests: int,
     perf_max_tokens: int,
-    weights: Optional[float],
+    weights_mmlu: float,
     results_dir: Path,
     benchmark_root: Path,
     startup_timeout: int,
@@ -529,7 +518,7 @@ def run(
     skip_coding: bool,
     ppl_reference: Path,
     skip_ppl: bool,
-    ppl_weight: float,
+    weights_ppl: float,
     ppl_ctx: int,
     ppl_runs: int,
     coding_kv_fix: str,
@@ -544,8 +533,8 @@ def run(
     _validate_run_options(
         skip_mmlu=skip_mmlu,
         mmlu_task=mmlu_task,
-        weights=weights,
-        ppl_weight=ppl_weight,
+        weights_mmlu=weights_mmlu,
+        weights_ppl=weights_ppl,
         coding_kv_fix=coding_kv_fix,
         skip_ppl=skip_ppl,
         ppl_reference=ppl_reference,
@@ -565,7 +554,7 @@ def run(
     )
     binary, version = _resolve_llama_server(llama_server)
     ppl_available, perplexity_bin = _resolve_ppl(skip_ppl, binary)
-    weight = _run_preflight(
+    _run_preflight(
         n_models=len(models),
         benchmark_root=benchmark_root,
         skip_mmlu=skip_mmlu,
@@ -576,7 +565,6 @@ def run(
         languages=languages,
         coding_limit=coding_limit,
         tries=tries,
-        weights=weights,
         yes=yes,
     )
 
@@ -606,7 +594,7 @@ def run(
         ppl_reference=Path(ppl_reference),
         ppl_ctx=ppl_ctx,
         ppl_runs=ppl_runs,
-        ppl_weight=ppl_weight,
+        weights_ppl=weights_ppl,
         ppl_available=ppl_available,
         perplexity_bin=perplexity_bin,
     )
@@ -618,14 +606,14 @@ def run(
         scores.append(run_model(cfg, model))
 
     console.rule("[bold]Scoring[/bold]")
-    compute_scores(scores, weight, ppl_weight if ppl_available else 0.0)
+    compute_scores(scores, weights_mmlu, weights_ppl if ppl_available else 0.0)
     meta = build_meta(cfg, time.time() - t_start)
     report_md, report_json = write_report(
         scores,
-        weight=weight,
+        weights_mmlu=weights_mmlu,
         results_dir=results_dir,
         meta=meta,
-        ppl_weight=ppl_weight if ppl_available else 0.0,
+        weights_ppl=weights_ppl if ppl_available else 0.0,
     )
     console.print(f"\n[bold]report:[/bold] {report_md}\n[bold]json:  [/bold] {report_json}")
 

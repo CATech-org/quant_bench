@@ -48,7 +48,7 @@ uv run quant-bench run \
 
 (`--port 8126` because 8080/8000 are taken by other local servers; default
 `--device vram` = `-ngl all`.) An equivalent non-interactive script is
-`run_example.sh` (it adds `--weights 0.5 --yes`; point `--llama-server` at your
+`run_example.sh` (it adds `--weights-mmlu 0.5 --yes`; point `--llama-server` at your
 binary if it is not on PATH).
 
 `--config` defaults to `models.yaml` and fails fast with a clear error if the
@@ -56,14 +56,14 @@ file is missing or invalid (bad YAML, missing gguf, tokenizer dir without a
 tokenizer file, >5 models, duplicates). `--results-dir` is required — use a
 different one per config so reports don't overwrite each other.
 
-Before anything starts you get a conservative **estimated runtime** (with the scope of each stage) and a `Continue? [Y/n]` prompt, then — unless `--weights` is given — the **MMLU weight** of the capability half of the composite score. The composite folds in PPL: with the defaults (`--ppl-weight 0.5`, `--weights 0.5`)
+Before anything starts you get a conservative **estimated runtime** (with the scope of each stage) and a `Continue? [Y/n]` prompt. The composite folds in PPL: with the defaults (`--weights-ppl 0.5`, `--weights-mmlu 0.5`)
 
 ```
 score = 0.50 × PPL(0-100) + 0.25 × MMLU% + 0.25 × aider pass@2%
 ```
 
 where `PPL(0-100) = 100 × min_ppl / model_ppl` (best quant in the run = 100).
-Pass `--yes` to skip the confirmation (scripted runs). Pass `--ppl-weight 0` to
+Pass `--yes` to skip the confirmation (scripted runs). Pass `--weights-ppl 0` to
 revert to the old MMLU+coding-only composite, or `--skip-ppl` to not run PPL.
 
 Results:
@@ -96,8 +96,8 @@ Results:
 | `--edit-format whole` | `whole` | aider edit format |
 | `--tries N` | `2` | polyglot tries per test (pass@N) |
 | `--coding-limit N` | – | only N polyglot tests — the harness shuffles unseeded, so results are not comparable across models |
-| `--weights W` | prompt | MMLU weight **within the capability half** (rest goes to aider coding), skips the prompt |
-| `--ppl-weight W` | `0.5` | PPL (fidelity) weight in the composite, 0.0-1.0 (0 = old MMLU+coding-only composite) |
+| `--weights-mmlu W` | `0.5` | MMLU's share of the non-PPL remainder (rest of the remainder goes to aider coding) |
+| `--weights-ppl W` | `0.5` | PPL (fidelity) weight of the composite, 0.0-1.0 (0 = MMLU+coding-only composite) |
 | `--ppl-reference PATH` | `scripts/ppl_ref.txt` | fixed reference text for the PPL fidelity metric |
 | `--ppl-ctx N` | `1024` | context window for the `llama-perplexity` probe |
 | `--ppl-runs N` | `2` | PPL runs per model (mean + run-to-run reproducibility) |
